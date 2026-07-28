@@ -415,7 +415,12 @@ def save_buffer_as_png(buffer, path):
 
 
 def load_png_into_shadow(drawable, path, expected_width, expected_height):
-    """Load a PNG through png-load -> write-buffer into the shadow buffer."""
+    """Load a PNG through png-load -> write-buffer into the shadow buffer.
+
+    Used by the whole-image mode: the result is the same size as
+    the drawable, so a direct load+write at origin (0, 0) is
+    correct.
+    """
     shadow_buffer = drawable.get_shadow_buffer()
     graph = Gegl.Node()
     loader = graph.create_child("gegl:png-load")
@@ -434,6 +439,95 @@ def load_png_into_shadow(drawable, path, expected_width, expected_height):
     loader.link(writer)
     writer.process()
     shadow_buffer.flush()
+
+
+def paste_roi_into_shadow(
+    shadow_buffer,
+    path,
+    sel_x,
+    sel_y,
+    sel_w,
+    sel_h,
+    context_px,
+    roi_w,
+    roi_h,
+):
+    """Load the worker's result PNG and paste the inner selection bbox
+    into the shadow buffer at the right pixel position.
+
+    The worker output is `roi_w x roi_h` (selection bbox + context
+    ring). The user only wants the inner `sel_w x sel_h` (the actual
+    selection bbox, no context ring). This function:
+
+    1. Loads the result PNG (default origin 0, 0).
+    2. Crops to the inner selection bbox (offset (context_px,
+       context_px), extent (sel_w, sel_h)). The crop's output
+       rectangle is at (context_px, context_px) in the input's
+       coordinate system.
+    3. Translates by (sel_x - context_px, sel_y - context_px) so
+       the output rectangle lands at (sel_x, sel_y) in the
+       drawable's coordinate system.
+    4. Writes to the shadow buffer at origin (sel_x, sel_y) —
+       only the inner selection bbox is touched, the rest of the
+       shadow buffer is untouched.
+
+    Without the crop, the user would see a 64 px "halo" of restored
+    pixels around their selection (the context ring) plus the
+    result would be written at (0, 0) instead of (sel_x, sel_y) — a
+    double bug. The translate fixes the position; the rectangle
+    drops the context ring.
+    """
+    expected_w = sel_w + 2 * context_px
+    expected_h = sel_h + 2 * context_px
+    if roi_w != expected_w or roi_h != expected_h:
+        raise ValueError(
+            f"result dimensions ({roi_w}x{roi_h}) don't match expected "
+            f"ROI+context size ({expected_w}x{expected_h})"
+        )
+
+    graph = Gegl.Node()
+    loader = graph.create_child("gegl:png-load")
+    loader.set_property("path", path)
+
+    crop = graph.create_child("gegl:rectangle")
+    crop.set_property("x", float(context_px))
+    crop.set_property("y", float(context_px))
+    crop.set_property("width", float(sel_w))
+    crop.set_property("height", float(sel_h))
+    crop.link(loader)
+
+    translate = graph.create_child("gegl:translate")
+    translate.set_property("x", float(sel_x - context_px))
+    translate.set_property("y", float(sel_y - context_px))
+    translate.link(crop)
+
+    writer = graph.create_child("gegl:write-buffer")
+    writer.set_property("buffer", shadow_buffer)
+    writer.link(translate)
+
+    graph.process()
+    shadow_buffer.flush()
+
+
+def extract_alpha_png(src_buffer, path):
+    """Save the alpha channel of an RGBA buffer as a Y u8 PNG.
+
+    Used to preserve the original alpha through the sidecar: the
+    GIMP side extracts the alpha, the worker combines it with the
+    model's RGB output, the GIMP side loads the combined RGBA back.
+
+    The extracted buffer is a single-channel Y u8. `save_buffer_as_png`
+    saves whatever format the buffer is in, so this produces a
+    grayscale PNG.
+    """
+    graph = Gegl.Node()
+    source = graph.create_child("gegl:buffer-source")
+    source.set_property("buffer", src_buffer)
+    extract = graph.create_child("gegl:component-extract")
+    extract.set_property("component", "alpha")
+    extract.link(source)
+    extract.process()
+    save_buffer_as_png(extract.get_property("buffer"), path)
 
 
 def _return_error(procedure, status, message):
@@ -534,19 +628,28 @@ class NafnetRestore(Gimp.PlugIn):
 
     # ----------------- Worker backend -----------------
 
-    def _resolve_worker_command(self, image_path, output_path):
+    def _resolve_worker_command(self, image_path, output_path, alpha_path=None):
         """Build the command line for the selected worker kind.
 
         Rust worker takes the same CLI flags as the Python worker.
         Both write a PNG to ``output_path`` and emit
         ``[LAMA_MARKER] phase <name>`` lines on stderr for progress
         parsing.
+
+        ``alpha_path`` is optional: when provided, the worker reads
+        the alpha channel from it and combines the model's RGB
+        output with the original alpha before writing. This
+        preserves alpha through the sidecar round-trip for RGBA
+        drawables.
         """
         rust_binary = find_rust_worker()
         use_rust = use_rust_worker() and rust_binary is not None
 
         if use_rust:
-            return [rust_binary, "--image", image_path, "--output", output_path, "--model", MODEL_PATH], True
+            cmd = [rust_binary, "--image", image_path, "--output", output_path, "--model", MODEL_PATH]
+            if alpha_path is not None:
+                cmd += ["--alpha", alpha_path]
+            return cmd, True
         if not os.path.isfile(WORKER_SCRIPT):
             raise FileNotFoundError(f"Worker script is missing: {WORKER_SCRIPT}. Reinstall the plug-in.")
 
@@ -555,7 +658,10 @@ class NafnetRestore(Gimp.PlugIn):
         # worker script's import fails, the worker process exits with
         # a non-zero code and the call site surfaces the detail in
         # the GIMP error dialog.
-        return [worker_python, WORKER_SCRIPT, "--image", image_path, "--output", output_path, "--model", MODEL_PATH], False
+        cmd = [worker_python, WORKER_SCRIPT, "--image", image_path, "--output", output_path, "--model", MODEL_PATH]
+        if alpha_path is not None:
+            cmd += ["--alpha", alpha_path]
+        return cmd, False
 
     def _run_whole(self, procedure, run_mode, image, drawables):
         """Restore the entire active drawable.
@@ -609,14 +715,24 @@ class NafnetRestore(Gimp.PlugIn):
             try:
                 with tempfile.TemporaryDirectory(prefix="gimp-nafnet-") as temp_dir:
                     image_path = os.path.join(temp_dir, "image.png")
+                    alpha_path = os.path.join(temp_dir, "alpha.png")
                     output_path = os.path.join(temp_dir, "result.png")
 
                     _phase("Preparing image...", 0.10)
-                    save_buffer_as_png(drawable.get_buffer(), image_path)
+                    # Save the drawable as RGBA so the worker can
+                    # round-trip the alpha channel through the
+                    # sidecar. For RGB drawables, the alpha bytes
+                    # are 255 throughout, so the preservation is a
+                    # no-op but the API stays consistent.
+                    full_buffer = drawable.get_buffer()
+                    save_buffer_as_png(full_buffer, image_path)
+                    extract_alpha_png(full_buffer, alpha_path)
 
                     _phase("Starting NAFNet worker...", 0.20)
                     try:
-                        command, use_rust = self._resolve_worker_command(image_path, output_path)
+                        command, use_rust = self._resolve_worker_command(
+                            image_path, output_path, alpha_path=alpha_path,
+                        )
                     except FileNotFoundError as exc:
                         return _execution_error(procedure, str(exc))
                     except RuntimeError as exc:
@@ -754,12 +870,15 @@ class NafnetRestore(Gimp.PlugIn):
             try:
                 with tempfile.TemporaryDirectory(prefix="gimp-nafnet-region-") as temp_dir:
                     image_path = os.path.join(temp_dir, "region.png")
+                    alpha_path = os.path.join(temp_dir, "alpha.png")
                     output_path = os.path.join(temp_dir, "result.png")
 
                     _phase("Cropping to selection + context...", 0.10)
                     # Crop the drawable's shadow buffer to the ROI
-                    # and save. GEGL's buffer-source + gegl:crop
-                    # handles the sub-region extraction.
+                    # and save. GEGL's buffer-source + gegl:rectangle
+                    # handles the sub-region extraction. We also
+                    # extract the alpha channel separately so the
+                    # worker can preserve it through the round-trip.
                     full_shadow = drawable.get_shadow_buffer()
                     graph = Gegl.Node()
                     source = graph.create_child("gegl:buffer-source")
@@ -772,11 +891,20 @@ class NafnetRestore(Gimp.PlugIn):
                     crop.link(source)
                     crop.process()
                     cropped = crop.get_property("buffer")
+                    # Save the cropped region. `save_buffer_as_png`
+                    # writes whatever format the buffer is in (RGBA
+                    # if the drawable is RGBA, RGB otherwise). The
+                    # worker reads RGB channels; the original alpha
+                    # is preserved separately via the alpha.png
+                    # side channel.
                     save_buffer_as_png(cropped, image_path)
+                    extract_alpha_png(cropped, alpha_path)
 
                     _phase("Starting NAFNet worker...", 0.20)
                     try:
-                        command, use_rust = self._resolve_worker_command(image_path, output_path)
+                        command, use_rust = self._resolve_worker_command(
+                            image_path, output_path, alpha_path=alpha_path,
+                        )
                     except FileNotFoundError as exc:
                         return _execution_error(procedure, str(exc))
                     except RuntimeError as exc:
@@ -816,50 +944,37 @@ class NafnetRestore(Gimp.PlugIn):
                         )
 
                     _phase("Pasting result back...", 0.90)
-                    # Load the result PNG (which has the ROI+context
-                    # dimensions) and paste it into the original
-                    # drawable at the ROI offset. We do NOT constrain
-                    # the update to the original selection bbox
-                    # because the user is using the selection as the
-                    # *region to restore*, not as the destination
-                    # of a paste — the model produced context pixels
-                    # which the GEGL paste silently overwrites in the
-                    # final view.
-                    #
-                    # However, since the user's intent is "only
-                    # restore the selection", we should crop the
-                    # result PNG to the original selection bbox before
-                    # pasting. To keep the GIMP-side glue simple in
-                    # v1, we just paste the full result and update
-                    # the original selection bbox — pixels in the
-                    # context ring are restored as a side effect.
-                    # In v2, crop the result to the selection bbox
-                    # first.
+                    # Load the result PNG (size roi_w x roi_h,
+                    # including context ring) and paste the inner
+                    # selection bbox (sel_w x sel_h) into the
+                    # shadow buffer at the correct pixel position
+                    # (sel_x, sel_y). The crop drops the context ring
+                    # so the user only sees the restoration they
+                    # selected; the translate fixes the position
+                    # (without it, the result would land at (0, 0)
+                    # in the drawable, which is a bug).
                     shadow = drawable.get_shadow_buffer()
-                    graph = Gegl.Node()
-                    loader = graph.create_child("gegl:png-load")
-                    loader.set_property("path", output_path)
-                    bounds = loader.get_bounding_box()
-                    if bounds.width != roi_w or bounds.height != roi_h:
-                        return _execution_error(
-                            procedure,
-                            f"NAFNet result dimensions differ from ROI: "
-                            f"{bounds.width}x{bounds.height} vs {roi_w}x{roi_h}",
+                    try:
+                        paste_roi_into_shadow(
+                            shadow_buffer=shadow,
+                            path=output_path,
+                            sel_x=sel_x,
+                            sel_y=sel_y,
+                            sel_w=sel_w,
+                            sel_h=sel_h,
+                            context_px=SELECTION_CONTEXT_PX,
+                            roi_w=roi_w,
+                            roi_h=roi_h,
                         )
-                    writer = graph.create_child("gegl:write-buffer")
-                    writer.set_property("buffer", shadow)
-                    loader.link(writer)
-                    writer.process()
-                    shadow.flush()
+                    except ValueError as exc:
+                        return _execution_error(procedure, str(exc))
 
                 drawable.merge_shadow(True)
-                # Update only the bounding box of the original
-                # selection — pixels outside are unchanged, so the
-                # GIMP display refresh is bounded to the affected
-                # region. Note: in v1 the result includes a context
-                # ring, so the actual displayed change is slightly
-                # larger than sel_w x sel_h. This is a known v1
-                # behavior; v2 should crop to the selection first.
+                # Update only the original selection bbox — the
+                # GIMP display refresh is bounded to what the user
+                # actually selected. The result inside the
+                # selection is the restored RGB; pixels outside are
+                # untouched.
                 drawable.update(sel_x, sel_y, sel_w, sel_h)
                 Gimp.displays_flush()
             except (OSError, RuntimeError, ValueError) as exc:

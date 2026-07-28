@@ -5,19 +5,26 @@ plus the file/place where it belongs.
 
 ## Worker hardening (next session)
 
-- [ ] **Alpha-channel preservation in region mode** — v1 simply
-      drops the alpha channel inside the bbox; the context ring is
-      restored as a side effect. v2 should copy the original
-      drawable's alpha bytes back into the bbox after applying the
-      model output. ~10 lines in the GIMP-side glue. File:
-      `nafnet-restoration-py/nafnet-restore.py::_run_region`.
+- [x] **Alpha-channel preservation in region mode** — done. The
+      GIMP-side glue extracts the original alpha to a separate Y u8
+      PNG, the worker combines it with the model output to produce
+      RGBA, and the GIMP-side writes the combined RGBA back to the
+      shadow buffer. Both workers (Python and Rust) accept an
+      `--alpha` argument. Tests in `tests/test_pipeline.py`
+      (`TestPythonWorkerWholeImage::test_alpha_preservation`,
+      `TestRustWorkerWholeImage::test_alpha_preservation`) verify
+      the alpha is preserved byte-for-byte through the sidecar
+      round-trip.
 
-- [ ] **Crop the result PNG to the original selection bbox before
-      pasting** — v1 pastes the full result (including the 64 px
-      context ring) and updates the original selection bbox. The
-      result is the user sees a slightly-larger "restored" area than
-      they selected. Fix: GEGL crop the result PNG to the original
-      selection bbox, then write into the shadow buffer.
+- [x] **Crop the result PNG to the original selection bbox before
+      pasting** — done. The GIMP-side glue now uses a GEGL graph
+      with `gegl:rectangle` (crop to inner selection bbox) +
+      `gegl:translate` (move to (sel_x, sel_y)) + `gegl:write-buffer`
+      (paste at translated position). The context ring is no longer
+      visible to the user and the result lands at the right
+      pixel position. Helper: `paste_roi_into_shadow` in
+      `nafnet-restore.py`. Fixed the position bug (the result was
+      previously written at (0, 0) instead of (sel_x, sel_y)).
 
 - [ ] **Headless GIMP CI** — none of the tests run automatically
       inside GIMP. Add a smoke test that launches GIMP with a
@@ -120,6 +127,14 @@ plus the file/place where it belongs.
       procedures (`plug-in-nafnet-restore` and
       `plug-in-nafnet-restore-region`), all error paths
       instrumented, log rotation, progress markers.
+- [x] Region-mode write-position bug fixed: helper
+      `paste_roi_into_shadow` uses GEGL rectangle+translate+write
+      to land the result at (sel_x, sel_y) and drop the 64 px
+      context ring. Result no longer "halos" outside the selection.
+- [x] Alpha-channel preservation: GIMP-side extracts original
+      alpha to a Y u8 PNG, both workers accept `--alpha` and
+      combine with the model RGB output to produce RGBA. Alpha is
+      preserved byte-for-byte through the sidecar round-trip.
 - [x] Rust worker written with tiled inference and 2D tent blend
       window, MSRV 1.94, edition 2024, ORT 2.0.0-rc.12.
 - [x] Python worker written as fallback (no tiling, single

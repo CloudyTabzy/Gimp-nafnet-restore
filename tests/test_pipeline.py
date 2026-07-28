@@ -260,6 +260,121 @@ class TestRustWorkerWholeImage:
         assert out.min() >= 0.0
         assert out.max() <= 1.0
 
+    def test_alpha_preservation(self, tmp_image_dir: Path) -> None:
+        """Rust worker also preserves the alpha channel byte-for-byte
+        when --alpha is provided. Same contract as the Python
+        worker."""
+        in_path = tmp_image_dir / "rgba.png"
+        alpha_path = tmp_image_dir / "alpha.png"
+        out_path = tmp_image_dir / "out.png"
+
+        rng = np.random.default_rng(42)
+        h, w = 96, 96
+        base = np.zeros((h, w, 3), dtype=np.float32)
+        alpha = np.zeros((h, w), dtype=np.float32)
+        for y in range(h):
+            for x in range(w):
+                base[y, x, 0] = x / w
+                base[y, x, 1] = y / h
+                base[y, x, 2] = (x + y) / (2 * (w + h))
+                alpha[y, x] = (x + y) / (2 * (w + h))
+        base += rng.random(base.shape, dtype=np.float32) * 0.20
+        base = np.clip(base, 0, 1)
+        alpha_u8 = (alpha * 255).round().astype(np.uint8)
+        rgba = np.dstack([base, alpha]) * 255
+        rgba = rgba.round().clip(0, 255).astype(np.uint8)
+        Image.fromarray(rgba, mode="RGBA").save(in_path)
+        Image.fromarray(alpha_u8, mode="L").save(alpha_path)
+
+        result = subprocess.run(
+            [str(RUST_WORKER),
+             "--image", str(in_path), "--output", str(out_path),
+             "--model", str(MODEL), "--alpha", str(alpha_path)],
+            capture_output=True, text=True, timeout=600,
+        )
+        if result.returncode != 0:
+            pytest.fail(f"rust worker failed: {result.stderr or result.stdout}")
+
+        out_img = Image.open(out_path)
+        assert out_img.mode == "RGBA", f"expected RGBA output, got {out_img.mode}"
+        out_rgba = np.asarray(out_img)
+        np.testing.assert_array_equal(
+            out_rgba[..., 3], alpha_u8,
+            err_msg="alpha channel not preserved byte-for-byte (Rust)",
+        )
+
+    def test_alpha_preservation(self, tmp_image_dir: Path) -> None:
+        """With --alpha, the worker's output RGBA must contain the
+        EXACT same alpha bytes as the input alpha file. RGB is
+        processed by the model; alpha passes through."""
+        # Build an RGBA image with a per-pixel alpha gradient so we
+        # can verify the alpha is preserved exactly (not just the
+        # shape, but the actual byte values).
+        in_path = tmp_image_dir / "rgba.png"
+        alpha_path = tmp_image_dir / "alpha.png"
+        out_path = tmp_image_dir / "out.png"
+
+        rng = np.random.default_rng(42)
+        h, w = 96, 96
+        base = np.zeros((h, w, 3), dtype=np.float32)
+        alpha = np.zeros((h, w), dtype=np.float32)
+        for y in range(h):
+            for x in range(w):
+                base[y, x, 0] = x / w
+                base[y, x, 1] = y / h
+                base[y, x, 2] = (x + y) / (2 * (w + h))
+                alpha[y, x] = (x + y) / (2 * (w + h))
+        base += rng.random(base.shape, dtype=np.float32) * 0.20
+        base = np.clip(base, 0, 1)
+        alpha_u8 = (alpha * 255).round().astype(np.uint8)
+        rgba = np.dstack([base, alpha]) * 255
+        rgba = rgba.round().clip(0, 255).astype(np.uint8)
+        Image.fromarray(rgba, mode="RGBA").save(in_path)
+        Image.fromarray(alpha_u8, mode="L").save(alpha_path)
+
+        result = subprocess.run(
+            [sys.executable, str(PYTHON_WORKER),
+             "--image", str(in_path), "--output", str(out_path),
+             "--model", str(MODEL), "--alpha", str(alpha_path)],
+            capture_output=True, text=True, timeout=300,
+        )
+        if result.returncode != 0:
+            pytest.fail(f"python worker failed: {result.stderr or result.stdout}")
+
+        out_img = Image.open(out_path)
+        assert out_img.mode == "RGBA", f"expected RGBA output, got {out_img.mode}"
+        out_rgba = np.asarray(out_img)
+        # The alpha channel must be byte-identical to the input.
+        np.testing.assert_array_equal(
+            out_rgba[..., 3], alpha_u8,
+            err_msg="alpha channel not preserved byte-for-byte",
+        )
+        # RGB output is still in [0, 1] (the model processed it).
+        out_rgb = out_rgba[..., :3] / 255.0
+        assert 0.0 <= out_rgb.min() and out_rgb.max() <= 1.0
+
+    def test_alpha_optional(self, tmp_image_dir: Path) -> None:
+        """Without --alpha, an RGBA input produces an RGB output.
+
+        This is the fallback path: for RGB drawables (the common
+        case for photo restoration) there's no alpha to preserve,
+        and the worker output is plain RGB."""
+        in_path = tmp_image_dir / "rgba.png"
+        out_path = tmp_image_dir / "out.png"
+        _write_png_with_alpha(64, 64, in_path)
+
+        result = subprocess.run(
+            [sys.executable, str(PYTHON_WORKER),
+             "--image", str(in_path), "--output", str(out_path),
+             "--model", str(MODEL)],  # no --alpha
+            capture_output=True, text=True, timeout=300,
+        )
+        if result.returncode != 0:
+            pytest.fail(f"python worker failed: {result.stderr or result.stdout}")
+
+        out_img = Image.open(out_path)
+        assert out_img.mode == "RGB", f"expected RGB output, got {out_img.mode}"
+
 
 # ---------------------------------------------------------------------------
 # Cross-worker equivalence

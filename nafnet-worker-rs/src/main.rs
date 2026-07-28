@@ -12,7 +12,8 @@
 //!   load PNG -> HWC f32 [0, 1] -> tile (default 512x512, 32px overlap)
 //!   -> for each tile: HWC -> CHW -> NAFNet -> CHW -> HWC -> place in
 //!   output with ramp weight -> finalize: divide by accumulated weight
-//!   -> save PNG.
+//!   -> if --alpha was given, combine the RGB output with the
+//!   original alpha bytes and save RGBA; otherwise save plain RGB.
 //!
 //! When the image fits in a single tile, the tile loop runs once and
 //! the blend is a no-op.
@@ -37,18 +38,24 @@ use rayon::prelude::*;
     about = "NAFNet image restoration sidecar (Rust CPU)"
 )]
 struct Args {
-    /// Input PNG path (RGB or RGBA; alpha is dropped, NAFNet only
-    /// takes 3 channels).
+    /// Input PNG path (RGB or RGBA).
     #[arg(long)]
     image: PathBuf,
 
-    /// Output PNG path. Same spatial size as input.
+    /// Output PNG path. Same spatial size as input. RGBA if
+    /// `--alpha` is provided, RGB otherwise.
     #[arg(long)]
     output: PathBuf,
 
     /// Path to the NAFNet ONNX model.
     #[arg(long)]
     model: PathBuf,
+
+    /// Optional Y u8 PNG containing the original alpha channel. When
+    /// provided, the output is RGBA with this alpha preserved
+    /// byte-for-byte. When omitted, the output is plain RGB.
+    #[arg(long)]
+    alpha: Option<PathBuf>,
 
     /// Tile size in pixels (square). Default 512. Larger tiles give
     /// better quality at higher memory cost; smaller tiles use less
@@ -113,7 +120,7 @@ fn run() -> Result<()> {
     ));
 
     let t_save = Instant::now();
-    save_image(&args.output, &restored)
+    save_image(&args.output, &restored, args.alpha.as_ref())
         .with_context(|| format!("failed to save image: {}", args.output.display()))?;
     marker(&format!("saved ({:.0}ms)", t_save.elapsed().as_secs_f32() * 1000.0));
     marker(&format!(
@@ -125,7 +132,9 @@ fn run() -> Result<()> {
 }
 
 /// Read a PNG into an `(H, W, 3)` f32 array in `[0, 1]`. Alpha is
-/// dropped (NAFNet only takes 3 channels).
+/// dropped at this point (NAFNet only takes 3 channels); the alpha
+/// channel is preserved separately via the `--alpha` argument if
+/// the caller passes one.
 fn load_image(path: &PathBuf) -> Result<Array3<f32>> {
     let img = image::open(path)
         .with_context(|| format!("image::open failed for {}", path.display()))?
@@ -147,27 +156,72 @@ fn load_image(path: &PathBuf) -> Result<Array3<f32>> {
     Ok(arr)
 }
 
-/// Write an `(H, W, 3)` f32 array in `[0, 1]` to a PNG. Output is
-/// always 8-bit RGB.
-fn save_image(path: &PathBuf, arr: &Array3<f32>) -> Result<()> {
+/// Write an `(H, W, 3)` f32 array in `[0, 1]` to a PNG. If
+/// `alpha_path` is provided, read the Y u8 alpha from it and write
+/// RGBA; otherwise write plain RGB.
+fn save_image(path: &PathBuf, arr: &Array3<f32>, alpha_path: Option<&PathBuf>) -> Result<()> {
     let (h, w) = (arr.dim().0, arr.dim().1);
-    let mut out = image::RgbImage::new(w as u32, h as u32);
-    out.as_mut()
-        .par_chunks_mut(w * 3)
-        .enumerate()
-        .for_each(|(y, row_buf)| {
-            for x in 0..w {
-                let r = quantize(arr[[y, x, 0]]);
-                let g = quantize(arr[[y, x, 1]]);
-                let b = quantize(arr[[y, x, 2]]);
-                let p = x * 3;
-                row_buf[p] = r;
-                row_buf[p + 1] = g;
-                row_buf[p + 2] = b;
-            }
-        });
-    out.save(path)
-        .with_context(|| format!("image save failed for {}", path.display()))?;
+
+    if let Some(alpha_path) = alpha_path {
+        // Combine the RGB model output with the original alpha
+        // (read from a Y u8 grayscale PNG) and save as RGBA.
+        let alpha_img = image::open(alpha_path)
+            .with_context(|| {
+                format!(
+                    "alpha file open failed for {}",
+                    alpha_path.display()
+                )
+            })?
+            .to_luma8();
+        if alpha_img.width() as usize != w || alpha_img.height() as usize != h {
+            return Err(anyhow!(
+                "alpha file dimensions ({}x{}) don't match image dimensions ({}x{})",
+                alpha_img.width(),
+                alpha_img.height(),
+                w,
+                h
+            ));
+        }
+
+        let mut out = image::RgbaImage::new(w as u32, h as u32);
+        out.as_mut()
+            .par_chunks_mut(w * 4)
+            .enumerate()
+            .for_each(|(y, row_buf)| {
+                for x in 0..w {
+                    let r = quantize(arr[[y, x, 0]]);
+                    let g = quantize(arr[[y, x, 1]]);
+                    let b = quantize(arr[[y, x, 2]]);
+                    let a = alpha_img.get_pixel(x as u32, y as u32).0[0];
+                    let p = x * 4;
+                    row_buf[p] = r;
+                    row_buf[p + 1] = g;
+                    row_buf[p + 2] = b;
+                    row_buf[p + 3] = a;
+                }
+            });
+        out.save(path)
+            .with_context(|| format!("image save failed for {}", path.display()))?;
+    } else {
+        // Plain RGB output (alpha is dropped).
+        let mut out = image::RgbImage::new(w as u32, h as u32);
+        out.as_mut()
+            .par_chunks_mut(w * 3)
+            .enumerate()
+            .for_each(|(y, row_buf)| {
+                for x in 0..w {
+                    let r = quantize(arr[[y, x, 0]]);
+                    let g = quantize(arr[[y, x, 1]]);
+                    let b = quantize(arr[[y, x, 2]]);
+                    let p = x * 3;
+                    row_buf[p] = r;
+                    row_buf[p + 1] = g;
+                    row_buf[p + 2] = b;
+                }
+            });
+        out.save(path)
+            .with_context(|| format!("image save failed for {}", path.display()))?;
+    }
     Ok(())
 }
 

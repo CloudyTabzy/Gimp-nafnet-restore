@@ -390,16 +390,68 @@ override in GIMP's keyboard shortcuts editor.
 For the selection-only mode, the **64 px context padding** is
 intentional: NAFNet needs surrounding pixels to know what the
 "sharp" reference is. The 64 px is clipped to image bounds, so
-edge selections still work. The restored region is the original
-selection bbox; the context pixels are processed but reported
-as "outside the updated bbox" in the v1 implementation, so the
-GIMP display refresh is bounded to what the user expects.
+edge selections still work.
 
-In v2, crop the result PNG to the original selection bbox before
-pasting, so the context ring's restored pixels are *not* visible
-to the user. This is a known v1 limitation; the user might
-notice a slight "halo" effect if they select a thin strip and the
-context ring is much larger.
+### Region-mode paste pipeline (the GEGL graph)
+
+The worker produces a result of size `(roi_w, roi_h)` = selection
+bbox + 64 px context on each side. The GIMP-side must:
+
+1. Crop the result to the *inner* selection bbox
+   (`sel_w x sel_h` at offset `(ctx, ctx)`) so the user doesn't see
+   the context ring as a "halo" of restored pixels around their
+   selection.
+2. Paste at the correct pixel position `(sel_x, sel_y)` in the
+   shadow buffer.
+
+The GEGL graph that does both in one pass is:
+
+```
+png-load → rectangle(x=ctx, y=ctx, w=sel_w, h=sel_h)
+        → translate(x=sel_x-ctx, y=sel_y-ctx)
+        → write-buffer(shadow)
+```
+
+The `gegl:rectangle` extracts the inner selection bbox from the
+worker's output. The `gegl:translate` shifts the result rectangle
+to the right pixel position. The `gegl:write-buffer` writes the
+translated rectangle into the shadow buffer at its current
+origin, which is now `(sel_x, sel_y)`.
+
+**Bug we fixed in this pass:** an earlier version of the code did
+`loader → writer` with no `rectangle` or `translate`, which
+writes the (smaller) result at the input's default origin
+`(0, 0)` — the top-left of the drawable, not at `(sel_x, sel_y)`.
+For a 4K image with a selection in the bottom-right corner, the
+result was being written into the top-left of the drawable. Hard
+to spot from GIMP's display because the user's "undo" still
+worked, but the visible result was wrong. The rectangle+translate
+fix is correct.
+
+### Alpha-channel preservation
+
+NAFNet is RGB-only. The GIMP-side uses `to_rgba8()` (not
+`to_rgb8()`) when saving the cropped/full buffer, so the alpha
+channel exists in the source PNG. The GIMP-side then:
+
+1. Saves the RGBA buffer as the worker input PNG (alpha is
+   present but the worker ignores it).
+2. Extracts the alpha channel with `gegl:component-extract
+   component=alpha` and saves it as a Y u8 PNG side-channel.
+3. Passes both files to the worker via `--alpha <path>`.
+4. The worker reads the alpha, runs the model on RGB, combines
+   the result with the original alpha, and saves as RGBA.
+5. The GIMP-side reads the RGBA output and writes to the shadow
+   buffer. All four channels are preserved byte-for-byte.
+
+For RGB drawables (the common case for photo restoration), the
+alpha bytes are 255 throughout, so the alpha pass-through is a
+no-op but the API stays consistent. For RGBA drawables, the
+alpha channel survives the sidecar round-trip.
+
+If the user has a 4K RGBA photo, this saves a 16 MB alpha channel
+from being lost on every restoration. The GIMP-side overhead is
+negligible (one extra `gegl:component-extract` call per restore).
 
 ---
 

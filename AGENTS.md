@@ -221,6 +221,13 @@ at the parent workspace directory (`C:\Dev\GIMP_Native_Plugin\`).
   `tile_size - tile_overlap` over the image, runs NAFNet on
   each tile, and blends predictions in the overlap region with
   a 2D tent window (`make_blend_window`).
+- The worker accepts an optional `--alpha` argument. When
+  provided, the output is RGBA with the original alpha channel
+  preserved byte-for-byte. The GIMP-side glue extracts the alpha
+  separately (via `gegl:component-extract component=alpha`) and
+  passes it as a side channel. Tests in
+  `tests/test_pipeline.py::TestRustWorkerWholeImage::test_alpha_preservation`
+  verify the contract.
 
 ### Documentation
 
