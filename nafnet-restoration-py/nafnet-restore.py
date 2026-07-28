@@ -80,6 +80,34 @@ WORKER_TIMEOUT_SECONDS = 600  # large images with tiling can be slow
 WORKER_POLL_INTERVAL_SECONDS = 0.25
 
 
+# --- diagnostic infrastructure -----------------------------------------
+# Write a timestamped line to sys.stderr with explicit flush.
+# GIMP captures the plug-in's stderr (via the wire protocol) and
+# surfaces it in the *Error Console* (Windows > Error Console)
+# when stderr is a TTY. From a non-TTY environment (e.g., user
+# launches GIMP from a terminal), stderr lines appear in real
+# time on the terminal. The ``flush=True`` is critical: GIMP may
+# kill the plug-in child before its buffers are flushed, in which
+# case unflushed output is lost.
+import os as _os_for_pid
+import sys as _sys_for_stderr
+import time as _t_for_stderr
+
+
+def _stderr(msg):
+    ts = _t_for_stderr.strftime("%H:%M:%S")
+    _sys_for_stderr.write(f"[nafnet {ts}] {msg}\n")
+    _sys_for_stderr.flush()
+
+
+# Module-load marker. If the user launches GIMP from a terminal
+# and the plug-in file is being loaded, this line should appear
+# immediately. If it doesn't, the file is not being executed at
+# all (likely a wrong shebang / .interp mapping, or the plug-in
+# is in the wrong directory).
+_stderr(f"module loaded: nafnet-restore.py (pid={_os_for_pid.getpid()})")
+
+
 def _log(msg: str) -> None:
     """Append a timestamped line to the plug-in log file.
 
@@ -596,13 +624,16 @@ def _safe_progress(callable_, *args, **kwargs):
 
 class NafnetRestore(Gimp.PlugIn):
     def do_set_i18n(self, _name):
+        _stderr("do_set_i18n called")
         return False
 
     def do_query_procedures(self):
-        return [
+        procs = [
             "plug-in-nafnet-restore",
             "plug-in-nafnet-restore-region",
         ]
+        _stderr(f"do_query_procedures -> {procs}")
+        return procs
 
     def _create_procedure(self, name, menu_label, blurb):
         Gegl.init(None)
@@ -654,7 +685,13 @@ class NafnetRestore(Gimp.PlugIn):
         return None
 
     def run(self, procedure, run_mode, image, drawables, config, run_data):
-        name = procedure.get_name()
+        try:
+            name = procedure.get_name()
+            n = len(drawables) if drawables is not None else 0
+            _stderr(f"run() called: name={name!r} drawables={n}")
+        except Exception as exc:
+            _stderr(f"run() entry failed: {type(exc).__name__}: {exc}")
+            raise
         if name == "plug-in-nafnet-restore-region":
             return self._run_region(procedure, run_mode, image, drawables)
         return self._run_whole(procedure, run_mode, image, drawables)
@@ -702,6 +739,7 @@ class NafnetRestore(Gimp.PlugIn):
         No selection interaction: the model processes the full
         drawable. Use for whole-image deblurring.
         """
+        _stderr("_run_whole entered")
         progress_started = False
 
         def _phase(text, fraction):
@@ -864,6 +902,7 @@ class NafnetRestore(Gimp.PlugIn):
         drawable with the original selection bbox as the destination.
         Pixels outside the original selection bbox are not modified.
         """
+        _stderr("_run_region entered")
         progress_started = False
 
         def _phase(text, fraction):
