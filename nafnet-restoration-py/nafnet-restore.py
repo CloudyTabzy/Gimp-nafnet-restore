@@ -514,11 +514,17 @@ def extract_alpha_png(src_buffer, path):
 
     Used to preserve the original alpha through the sidecar: the
     GIMP side extracts the alpha, the worker combines it with the
-    model's RGB output, the GIMP side loads the combined RGBA back.
+    model's RGB output, and the GIMP side loads the combined RGBA back.
 
     The extracted buffer is a single-channel Y u8. `save_buffer_as_png`
     saves whatever format the buffer is in, so this produces a
     grayscale PNG.
+
+    **Caller must verify the source buffer has an alpha channel**
+    first (via `_drawable_has_alpha`). Calling this on an RGB buffer
+    fails with \"Invalid type\" because the GEGL buffer has no
+    alpha component to extract. This is the bug that surfaced in
+    the first round of testing.
     """
     graph = Gegl.Node()
     source = graph.create_child("gegl:buffer-source")
@@ -528,6 +534,33 @@ def extract_alpha_png(src_buffer, path):
     extract.link(source)
     extract.process()
     save_buffer_as_png(extract.get_property("buffer"), path)
+
+
+def _drawable_has_alpha(drawable):
+    """Return True if the active drawable's image has an alpha channel.
+
+    Looks at the image's base type (Gimp.ImageBaseType) rather than
+    the drawable's type. The base type tells us the image's color
+    space: RGB / GRAY / INDEXED have no alpha; RGBA / GRAYA /
+    INDEXEDA do. For our 1:1 image-restoration use case, this is
+    the right check — it tells us whether the alpha round-trip is
+    meaningful for the image the user is restoring.
+
+    Implementation notes:
+    - C API equivalent: ``gimp_image_get_base_type()`` in
+      ``libgimp/gimpimage_pdb.h`` (returns ``GimpImageBaseType``).
+    - The drawable-level ``gimp_drawable_type_with_alpha()`` is
+      also available, but it forces RGBA on indexed drawables which
+      isn't what we want. The image's base type is the right
+      property to check.
+    """
+    image = drawable.get_image()
+    base_type = image.get_base_type()
+    return base_type in (
+        Gimp.ImageBaseType.RGBA,
+        Gimp.ImageBaseType.GRAYA,
+        Gimp.ImageBaseType.INDEXEDA,
+    )
 
 
 def _return_error(procedure, status, message):
@@ -708,6 +741,13 @@ class NafnetRestore(Gimp.PlugIn):
                     f"NAFNet model is missing: {MODEL_PATH}. Reinstall the plug-in.",
                 )
 
+            has_alpha = _drawable_has_alpha(drawable)
+            _log(
+                f"whole-restore: drawable={width}x{height} "
+                f"has_alpha={has_alpha} "
+                f"image.get_base_type()={image.get_base_type()!r}"
+            )
+
             _safe_progress(Gimp.progress_init, "NAFNet Restore")
             progress_started = True
             _phase("Preparing image...", 0.05)
@@ -715,29 +755,41 @@ class NafnetRestore(Gimp.PlugIn):
             try:
                 with tempfile.TemporaryDirectory(prefix="gimp-nafnet-") as temp_dir:
                     image_path = os.path.join(temp_dir, "image.png")
-                    alpha_path = os.path.join(temp_dir, "alpha.png")
                     output_path = os.path.join(temp_dir, "result.png")
 
                     _phase("Preparing image...", 0.10)
-                    # Save the drawable as RGBA so the worker can
-                    # round-trip the alpha channel through the
-                    # sidecar. For RGB drawables, the alpha bytes
-                    # are 255 throughout, so the preservation is a
-                    # no-op but the API stays consistent.
+                    # Save the drawable buffer. The buffer is
+                    # whatever format the drawable uses (RGB or
+                    # RGBA). The worker reads only the RGB channels;
+                    # the alpha (if any) is preserved separately.
                     full_buffer = drawable.get_buffer()
-                    save_buffer_as_png(full_buffer, image_path)
-                    extract_alpha_png(full_buffer, alpha_path)
+                    _log(f"whole-restore: buffer.get_format()={full_buffer.get_format()!r}")
+
+                    image_alpha = None
+                    if has_alpha:
+                        # RGBA image: extract the alpha channel
+                        # so the worker can combine it with the
+                        # model's RGB output. For RGB images,
+                        # there's no alpha component to extract;
+                        # calling `gegl:component-extract` on an
+                        # RGB buffer fails with "Invalid type".
+                        image_alpha = os.path.join(temp_dir, "alpha.png")
+                        extract_alpha_png(full_buffer, image_alpha)
+                        _log(f"whole-restore: alpha extracted to {image_alpha}")
+                    else:
+                        _log("whole-restore: no alpha (RGB image), skipping alpha round-trip")
 
                     _phase("Starting NAFNet worker...", 0.20)
                     try:
                         command, use_rust = self._resolve_worker_command(
-                            image_path, output_path, alpha_path=alpha_path,
+                            image_path, output_path, alpha_path=image_alpha,
                         )
                     except FileNotFoundError as exc:
                         return _execution_error(procedure, str(exc))
                     except RuntimeError as exc:
                         return _calling_error(procedure, str(exc))
 
+                    _log(f"whole-restore: command ({len(command)} args): {' '.join(command)}")
                     if use_rust:
                         _log("worker: rust")
                     else:
@@ -752,6 +804,14 @@ class NafnetRestore(Gimp.PlugIn):
                             procedure,
                             f"Could not start the NAFNet worker: {exc}",
                         )
+
+                    # Log the worker's full output (marker lines) for
+                    # the diagnostic log. On failure, the stderr is
+                    # already in completed.stdout (we merged them).
+                    if completed.stdout:
+                        for line in completed.stdout.splitlines():
+                            if line.strip():
+                                _log(f"worker: {line.strip()}")
 
                     if completed.timed_out:
                         return _execution_error(
@@ -850,6 +910,14 @@ class NafnetRestore(Gimp.PlugIn):
                     f"NAFNet model is missing: {MODEL_PATH}. Reinstall the plug-in.",
                 )
 
+            has_alpha = _drawable_has_alpha(drawable)
+            _log(
+                f"region-restore: drawable={width}x{height} "
+                f"has_alpha={has_alpha} "
+                f"image.get_base_type()={image.get_base_type()!r} "
+                f"selection={sel_x},{sel_y} {sel_w}x{sel_h}"
+            )
+
             # Compute the expanded ROI in original-image pixel
             # coordinates. The bbox+context is the region the model
             # processes; only the original selection bbox is pasted
@@ -860,8 +928,10 @@ class NafnetRestore(Gimp.PlugIn):
             roi_w = min(width, sel_x + sel_w + ctx) - roi_x
             roi_h = min(height, sel_y + sel_h + ctx) - roi_y
 
-            _log(f"region-restore: selection {sel_x},{sel_y} {sel_w}x{sel_h}, "
-                 f"ROI {roi_x},{roi_y} {roi_w}x{roi_h}")
+            _log(
+                f"region-restore: ROI {roi_x},{roi_y} {roi_w}x{roi_h} "
+                f"(selection + {ctx}px context)"
+            )
 
             _safe_progress(Gimp.progress_init, "NAFNet Restore Region")
             progress_started = True
@@ -870,16 +940,17 @@ class NafnetRestore(Gimp.PlugIn):
             try:
                 with tempfile.TemporaryDirectory(prefix="gimp-nafnet-region-") as temp_dir:
                     image_path = os.path.join(temp_dir, "region.png")
-                    alpha_path = os.path.join(temp_dir, "alpha.png")
                     output_path = os.path.join(temp_dir, "result.png")
 
                     _phase("Cropping to selection + context...", 0.10)
                     # Crop the drawable's shadow buffer to the ROI
                     # and save. GEGL's buffer-source + gegl:rectangle
                     # handles the sub-region extraction. We also
-                    # extract the alpha channel separately so the
-                    # worker can preserve it through the round-trip.
+                    # extract the alpha channel separately (when
+                    # the drawable has one) so the worker can
+                    # preserve it through the round-trip.
                     full_shadow = drawable.get_shadow_buffer()
+                    _log(f"region-restore: full_shadow.get_format()={full_shadow.get_format()!r}")
                     graph = Gegl.Node()
                     source = graph.create_child("gegl:buffer-source")
                     source.set_property("buffer", full_shadow)
@@ -891,6 +962,7 @@ class NafnetRestore(Gimp.PlugIn):
                     crop.link(source)
                     crop.process()
                     cropped = crop.get_property("buffer")
+                    _log(f"region-restore: cropped.get_format()={cropped.get_format()!r}")
                     # Save the cropped region. `save_buffer_as_png`
                     # writes whatever format the buffer is in (RGBA
                     # if the drawable is RGBA, RGB otherwise). The
@@ -898,18 +970,32 @@ class NafnetRestore(Gimp.PlugIn):
                     # is preserved separately via the alpha.png
                     # side channel.
                     save_buffer_as_png(cropped, image_path)
-                    extract_alpha_png(cropped, alpha_path)
+
+                    image_alpha = None
+                    if has_alpha:
+                        # RGBA image: extract the alpha channel so
+                        # the worker can combine it with the model's
+                        # RGB output. For RGB images there's no
+                        # alpha component to extract; calling
+                        # `gegl:component-extract` on an RGB buffer
+                        # fails with "Invalid type".
+                        image_alpha = os.path.join(temp_dir, "alpha.png")
+                        extract_alpha_png(cropped, image_alpha)
+                        _log(f"region-restore: alpha extracted to {image_alpha}")
+                    else:
+                        _log("region-restore: no alpha (RGB image), skipping alpha round-trip")
 
                     _phase("Starting NAFNet worker...", 0.20)
                     try:
                         command, use_rust = self._resolve_worker_command(
-                            image_path, output_path, alpha_path=alpha_path,
+                            image_path, output_path, alpha_path=image_alpha,
                         )
                     except FileNotFoundError as exc:
                         return _execution_error(procedure, str(exc))
                     except RuntimeError as exc:
                         return _calling_error(procedure, str(exc))
 
+                    _log(f"region-restore: command ({len(command)} args): {' '.join(command)}")
                     if use_rust:
                         _log("worker: rust")
                     else:
@@ -924,6 +1010,14 @@ class NafnetRestore(Gimp.PlugIn):
                             procedure,
                             f"Could not start the NAFNet worker: {exc}",
                         )
+
+                    # Log the worker's full output (marker lines) for
+                    # the diagnostic log. On failure, the stderr is
+                    # already in completed.stdout (we merged them).
+                    if completed.stdout:
+                        for line in completed.stdout.splitlines():
+                            if line.strip():
+                                _log(f"worker: {line.strip()}")
 
                     if completed.timed_out:
                         return _execution_error(

@@ -289,6 +289,55 @@ instead - it's the supported way.
    present / source not found / cargo missing / build failed)
    and never block on a Rust build.
 
+### 9a. Bonus mistake: unconditional GEGL operations on RGB drawables
+
+**Symptom:** User runs the plug-in on an RGB image and gets a GIMP
+error dialog with the unhelpful message `NAFNet Restore failed:
+Invalid type`. The plug-in silently does the wrong thing.
+
+**Cause:** The GIMP-side glue extracted the alpha channel via
+`gegl:component-extract component=alpha` and passed the result
+to the worker via `--alpha`. For RGB drawables, the buffer has no
+alpha component to extract; GEGL raises an "Invalid type" error
+(the buffer's format is `R'G'B' u8`, not `R'G'B'A u8`, so the
+`alpha` component doesn't exist).
+
+The fix is to check the drawable's image type *before* calling
+`gegl:component-extract`:
+
+```python
+def _drawable_has_alpha(drawable):
+    image = drawable.get_image()
+    base_type = image.get_base_type()
+    return base_type in (
+        Gimp.ImageBaseType.RGBA,
+        Gimp.ImageBaseType.GRAYA,
+        Gimp.ImageBaseType.INDEXEDA,
+    )
+```
+
+If the base type is RGB / GRAY / INDEXED, skip the alpha
+extraction and let the worker produce plain RGB. The worker
+preserves the byte-for-byte contract only when `--alpha` is
+provided.
+
+The general lesson: **GEGL operations that assume a specific
+buffer format fail silently with "Invalid type"** when the format
+doesn't match. Always check the buffer's format (`buffer.get_format()`)
+or the source image's base type *before* running format-specific
+operations like `gegl:component-extract` and the various channel
+extractors / `gegl:set-png`.
+
+This bug was caught the first time the user tested the plug-in
+on an actual RGB photo (3-channel, no alpha). The "Invalid type"
+error didn't say *which* format was expected or *where* in the
+pipeline it failed — both reasons to add explicit diagnostic logging
+that names each GEGL operation and the buffer format at that
+point. After the fix, the diagnostic log includes the drawable
+type, the buffer format at each step, and the worker's full stdout
+— enough to triage any future "Invalid type"-class error in
+seconds instead of hours.
+
 ---
 
 ## 10. Where to go from here

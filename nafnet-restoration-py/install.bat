@@ -23,18 +23,35 @@ if not defined APPDATA (
     exit /b 1
 )
 
-for %%F in (nafnet-restore.py nafnet_worker.py nafnet-REDS-width64_v1.onnx) do (
+for %%F in (nafnet-restore.py nafnet_worker.py) do (
     if not exist "%SRC%%%F" (
         echo ERROR: Required file not found: %SRC%%%F
         exit /b 1
     )
 )
 
+REM The NAFNet model is too large to commit (~275 MB), so install.bat
+REM downloads it from HuggingFace. The model is searched for in two
+REM places: (1) the same dir as install.bat (the standard location
+REM for a self-contained plug-in subdir), and (2) the parent project
+REM dir (where the developer typically has the model after running
+REM tools/inspect_onnx.py). If neither has the model, download it.
+set "NAFNET_MODEL_PATH=%SRC%nafnet-REDS-width64_v1.onnx"
+if not exist "%NAFNET_MODEL_PATH%" if exist "%SRC%..\NAFNet-REDS-width64_v1.onnx" (
+    echo NAFNet model not found in %SRC%; copying from parent project dir.
+    copy /Y "%SRC%..\NAFNet-REDS-width64_v1.onnx" "%NAFNET_MODEL_PATH%" >nul || (
+        echo ERROR: Failed to copy model from parent dir.
+        exit /b 1
+    )
+)
+
 REM The NAFNet model is fetched from HuggingFace if not present in
 REM the source dir. This keeps the repo small (model is ~275 MB)
-REM while still giving the user a one-command install.
+REM while still giving the user a one-command install. The
+REM parent-dir check above (`%SRC%..\NAFNet-...`) is a convenience
+REM for developers who already have the model there; if that
+REM doesn't have it either, we download.
 set "NAFNET_MODEL_URL=https://huggingface.co/deepghs/image_restoration/resolve/main/NAFNet-REDS-width64_v1.onnx?download=true"
-set "NAFNET_MODEL_PATH=%SRC%nafnet-REDS-width64_v1.onnx"
 if not exist "%NAFNET_MODEL_PATH%" (
     echo.
     echo NAFNet model not found locally. Downloading from:
