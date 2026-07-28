@@ -1,0 +1,26 @@
+# Model and worker binary
+# nafnet-REDS-width64_v1.onnx is downloaded by install.bat from
+# HuggingFace. Don't commit it (275 MB) — install.bat transparently
+# fetches it on first run.
+NAFNet-REDS-width64_v1.onnx
+
+# User-specific worker config. install.bat writes this with the
+# worker's resolved Python path; the deployed copy at
+# %APPDATA%/GIMP/3.2/plug-ins/nafnet-restore/nafnet_config.json is
+# the one the plug-in actually reads, the source copy is a staging
+# area.
+nafnet-restoration-py/nafnet_config.json
+
+# Rust build artifacts
+# Note: nafnet-worker-rs/Cargo.lock IS committed (this is a binary
+# crate, we want reproducible builds). The target/ directory is
+# ignored (build artifacts).
+nafnet-worker-rs/target/
+
+# Python
+*.pyc
+__pycache__/
+.pytest_cache/
+
+# Test output
+tests/outputs/

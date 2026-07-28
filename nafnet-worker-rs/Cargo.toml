@@ -1,0 +1,69 @@
+[package]
+name = "nafnet-worker"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+description = "NAFNet image restoration sidecar for the GIMP Native plug-in (Rust CPU)"
+
+# This binary is the optional Rust sidecar for the GIMP Native plug-in.
+# The Python `nafnet_worker.py` is the default worker; the Rust worker is
+# opt-in via `LAMA_USE_RUST_WORKER=1` or `"worker_kind": "rust"` in
+# `nafnet_config.json`. CPU-only build; GPU features are opt-in at build
+# time (see [features] below). Mirrors the LaMa worker architecture.
+
+[dependencies]
+# `ort` is consumed from the external checkout at `../../ort-2.0.0-rc.12`
+# (the workspace root, sibling of `Gimp-lama-inpainting/`). This
+# keeps the upstream ORT crate out of the git repo.
+#
+# Pinned to rc.12: prebuilt ORT 1.24.2 binaries, compiled against MSVC STL
+# versions that match the current toolchain. ort-main's newer prebuilts
+# reference symbols our toolchain doesn't have. See
+# Gimp-lama-inpainting/lama-worker-rs/Cargo.toml for the full rationale.
+#
+# `download-binaries` pulls a prebuilt `onnxruntime` shared library at
+# build time so the linker can find `OrtGetApiBase`. `copy-dylibs`
+# places that dylib next to the produced binary so the GIMP parent
+# can launch the worker without extra `PATH` configuration.
+ort = { path = "../../ort-2.0.0-rc.12", default-features = false, features = [
+    "std",
+    "ndarray",
+    "copy-dylibs",
+    "download-binaries",
+    "tls-native",
+] }
+
+# PNG I/O
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Numpy equivalent for tensor manipulation
+ndarray = { version = "0.17", default-features = false }
+
+# CLI parsing
+clap = { version = "4", default-features = false, features = ["std", "derive", "help"] }
+
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+    "env-filter",
+    "fmt",
+    "registry",
+] }
+
+# Parallel image processing for per-row preprocessing (HWC -> CHW) and
+# postprocessing (CHW -> HWC). Tiles themselves are processed serially
+# (batch=1) because NAFNet's ONNX graph has a dynamic batch dim and
+# the ORT CPU EP is already internally parallelized.
+rayon = "1.10"
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Opt-in GPU execution-provider features. Off by default; the default
+# build is CPU-only. DirectML works on any DX12 GPU; CUDA needs NVIDIA;
+# WebGPU uses Dawn natively on Windows (DX12) / Linux (Vulkan).
+[features]
+default = []
+cuda = ["ort/cuda"]
+directml = ["ort/directml"]
+webgpu = ["ort/webgpu"]
