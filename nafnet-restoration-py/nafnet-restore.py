@@ -719,6 +719,37 @@ def extract_alpha_png(src_buffer, path):
     _log("extract_alpha_png: done; " + path + " size=" + str(os.path.getsize(path)))
 
 
+def _extract_alpha_from_png(image_path, alpha_path):
+    """Extract the alpha channel of a PNG file and save it as Y u8 PNG.
+
+    Same GEGL pattern as ``extract_alpha_png`` (buffer-source ->
+    component-extract -> png-save) but starting from a file path
+    rather than a GeglBuffer. The png-load node reads the input
+    PNG, the component-extract node pulls out the alpha, the
+    png-save node writes it. ``saver.process()`` at the end runs
+    the whole chain.
+
+    Used by the region code path: the cropped region is first
+    saved as RGB(A) PNG (via the rectangle pipeline), then
+    re-loaded through png-load to feed the alpha-extract chain.
+    The intermediate PNG load is a few hundred KB and adds
+    <50 ms; we accept the cost in exchange for a pipeline that
+    doesn't depend on a non-existent buffer property.
+    """
+    graph = Gegl.Node()
+    loader = graph.create_child("gegl:png-load")
+    loader.set_property("path", image_path)
+    extract = graph.create_child("gegl:component-extract")
+    extract.set_property("component", "alpha")
+    loader.link(extract)
+    saver = graph.create_child("gegl:png-save")
+    saver.set_property("path", alpha_path)
+    extract.link(saver)
+    saver.process()
+    if not os.path.isfile(alpha_path):
+        raise OSError("gegl:png-save did not create " + alpha_path)
+
+
 def _return_error(procedure, status, message):
     error = GLib.Error.new_literal(Gimp.PlugIn.error_quark(), message, 0)
     return procedure.new_return_values(status, error)
@@ -759,6 +790,49 @@ class NafnetRestore(Gimp.PlugIn):
             "plug-in-nafnet-restore",
             "plug-in-nafnet-restore-region",
         ]
+
+    def do_set_sensitivity(self, sensitivity_mask):
+        """Grey out ``plug-in-nafnet-restore-region`` when the
+        active image has no non-empty selection.
+
+        GIMP's built-in ``GimpProcedureSensitivityMask`` flags
+        are drawable-based only (DRAWABLE / DRAWABLES /
+        NO_DRAWABLES / NO_IMAGE / ALWAYS). There is no
+        SELECTION mask in the API. To grey out by selection
+        we override this virtual method, which GIMP calls when
+        it needs to know whether the menu item should be
+        sensitive.
+
+        ``self`` is the GimpProcedure instance. For
+        image-scoped procedures the current image is the
+        first argument of the procedure; we pull it via
+        ``get_arguments()``. ``Gimp.Selection.bounds()``
+        returns ``(non_empty, x1, y1, x2, y2)`` where
+        ``non_empty`` is False for "select none".
+
+        Any exception (e.g. no image, malformed args) is
+        swallowed and the procedure is left sensitive. The
+        plug-in's own error path returns a friendly
+        "Make a non-empty selection first." error in
+        ``_run_region`` when the user clicks an unsensitive
+        item via the keyboard, so the worst case is a
+        non-actionable menu item, never a crash.
+        """
+        try:
+            if self.get_name() != "plug-in-nafnet-restore-region":
+                return True
+            args = self.get_arguments()
+            if not args:
+                return True
+            image = args[0]
+            if image is None:
+                return True
+            non_empty, _, _, _, _ = image.get_selection().bounds()
+            return bool(non_empty)
+        except Exception as exc:
+            _log("do_set_sensitivity: " + type(exc).__name__ + ": " + str(exc)
+                 + " (defaulting to sensitive)")
+            return True
 
     def _create_procedure(self, name, menu_label, blurb):
         Gegl.init(None)
@@ -1103,11 +1177,15 @@ class NafnetRestore(Gimp.PlugIn):
 
                     _phase("Cropping to selection + context...", 0.10)
                     # Crop the drawable's shadow buffer to the ROI
-                    # and save. GEGL's buffer-source + gegl:rectangle
-                    # handles the sub-region extraction. We also
-                    # extract the alpha channel separately (only if
-                    # the drawable has one) so the worker can
-                    # preserve it through the round-trip.
+                    # and save. Same GEGL pattern as the alpha
+                    # rebuild: buffer-source -> gegl:rectangle ->
+                    # png-save, with saver.process() at the end. The
+                    # OLD code tried `crop.get_property("buffer")`
+                    # which silently fails because gegl:rectangle
+                    # has no `buffer` property (its only props are
+                    # x/y/width/height/color -- output flows through
+                    # pads, not properties). Same root cause as the
+                    # alpha "Invalid type" error.
                     _log("_run_region: getting shadow buffer (has_alpha=" + str(has_alpha) + ")")
                     full_shadow = drawable.get_shadow_buffer()
                     _log("_run_region: shadow buffer obtained")
@@ -1119,23 +1197,26 @@ class NafnetRestore(Gimp.PlugIn):
                     crop.set_property("y", float(roi_y))
                     crop.set_property("width", float(roi_w))
                     crop.set_property("height", float(roi_h))
-                    crop.link(source)
-                    _log("_run_region: running gegl:rectangle crop")
-                    crop.process()
-                    _log("_run_region: crop done; reading buffer")
-                    cropped = crop.get_property("buffer")
-                    _log("_run_region: cropped buffer obtained")
-                    # Save the cropped region. `save_buffer_as_png`
-                    # writes whatever format the buffer is in (RGBA
-                    # if the drawable is RGBA, RGB otherwise). The
-                    # worker reads RGB channels; the original alpha
-                    # is preserved separately via the alpha.png
-                    # side channel.
-                    _log("_run_region: saving region.png to " + image_path)
-                    save_buffer_as_png(cropped, image_path)
+                    _log("_run_region: linking source -> crop")
+                    source.link(crop)
+                    saver = graph.create_child("gegl:png-save")
+                    saver.set_property("path", image_path)
+                    _log("_run_region: linking crop -> saver")
+                    crop.link(saver)
+                    _log("_run_region: saver.process() (runs the whole chain)")
+                    saver.process()
+                    if not os.path.isfile(image_path):
+                        raise OSError("gegl:png-save did not create " + image_path)
+                    _log("_run_region: region.png saved size=" + str(os.path.getsize(image_path)))
                     if has_alpha:
-                        _log("_run_region: region.png saved; extracting alpha")
-                        extract_alpha_png(cropped, alpha_path)
+                        _log("_run_region: extracting alpha from region.png")
+                        # Re-load region.png through png-load to
+                        # extract alpha. We don't have a GeglBuffer
+                        # in hand (the previous version's broken
+                        # pipeline left us without one), so the
+                        # alpha extraction is its own GEGL graph:
+                        # png-load -> component-extract -> png-save.
+                        _extract_alpha_from_png(image_path, alpha_path)
                         _log("_run_region: alpha.png extracted")
                     else:
                         _log("_run_region: no alpha to extract (RGB drawable); worker will use input alpha")
