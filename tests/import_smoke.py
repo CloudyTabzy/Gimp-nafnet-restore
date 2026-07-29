@@ -3,16 +3,26 @@
 Mocks the GIMP/GEGL/Python-GObject modules so we can at least
 syntax-and-import-check the file. If the file fails to import
 (syntax error, undefined name, bad attribute, etc.), GIMP would
-fail to load it and the menu items would not appear — this is
-the "nothing happens at all" failure mode the user reported.
+fail to load it and the menu items would not appear - this is
+the "nothing happens at all" failure mode that hides all errors.
 """
 import importlib.util
+import os
 import sys
 import types
 import unittest.mock as mock
 from pathlib import Path
 
-DEPLOYED = Path(r"C:\Users\User\AppData\Roaming\GIMP\3.2\plug-ins\nafnet-restore\nafnet-restore.py")
+# Cross-platform path to the deployed plug-in. On Windows, the
+# per-user GIMP plug-in directory is under %APPDATA%. On other
+# platforms, fall back to ~/.config (the XDG-style default) for
+# portability, even though GIMP 3.2 is primarily Windows-targeted.
+if os.name == "nt":
+    _config_root = Path(os.environ["APPDATA"]) / "GIMP" / "3.2" / "plug-ins"
+else:
+    _config_root = Path.home() / ".config" / "GIMP" / "3.2" / "plug-ins"
+
+DEPLOYED = _config_root / "nafnet-restore" / "nafnet-restore.py"
 
 
 def mock_gi_module(name: str, **attrs) -> types.ModuleType:

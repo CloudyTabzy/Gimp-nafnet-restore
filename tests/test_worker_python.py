@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-REPO = Path(r"C:\Dev\GIMP_Native_Plugin\Gimp-restoration-plugin")
+REPO = Path(__file__).resolve().parent.parent
 WORKER = REPO / "nafnet-restoration-py" / "nafnet_worker.py"
 MODEL = REPO / "NAFNet-REDS-width64_v1.onnx"
 

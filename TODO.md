@@ -274,9 +274,10 @@ catch without reading the GIMP/GEGL source.
 ## Stretch goals (deferred)
 
 - [ ] **Direct GIMP C plug-in via Zig** — see
-      `C:\Dev\GIMP_Native_Plugin\GOAL-Native-GIMP-Plugin-via-Zig.md`
-      for the feasibility analysis. Bypasses the entire
-      sidecar architecture; one `.dll` GIMP loads
+      `GOAL-Native-GIMP-Plugin-via-Zig.md` (in the parent
+      workspace directory) for the feasibility analysis.
+      Bypasses the entire sidecar architecture; one `.dll`
+      GIMP loads
       natively. Worth doing if the sidecar proves fragile
       on a GIMP 3.4 / GIMP 4 transition.
 - [ ] **Multiple-model plug-in** — register one entry

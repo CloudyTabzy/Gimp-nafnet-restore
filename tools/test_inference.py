@@ -1,9 +1,18 @@
-import onnxruntime as ort
+"""Sanity-test NAFNet inference: run on synthetic inputs, save
+PNGs to the project root. Run from anywhere; the model is
+located relative to this file's directory (the model is not
+committed -- see ``install.bat`` and ``.gitignore``; download
+via HuggingFace).
+"""
+from pathlib import Path
+
 import numpy as np
+import onnxruntime as ort
 from PIL import Image
 
-sess = ort.InferenceSession(r'C:\Dev\GIMP_Native_Plugin\Gimp-restoration-plugin\NAFNet-REDS-width64_v1.onnx',
-                             providers=['CPUExecutionProvider'])
+REPO = Path(__file__).resolve().parent.parent
+MODEL = REPO / "NAFNet-REDS-width64_v1.onnx"
+sess = ort.InferenceSession(str(MODEL), providers=['CPUExecutionProvider'])
 inp_name = sess.get_inputs()[0].name
 
 # Try a photo-like synthetic image: smooth gradient with sharp edges
@@ -53,11 +62,11 @@ print(f'Input [-1,1], output range [{out_n_crop.min():.2f}, {out_n_crop.max():.2
 # Save outputs as PNG to visually inspect
 out_png = np.clip(out_crop, 0, 1)[0].transpose(1, 2, 0)  # CHW -> HWC, RGB
 out_png = (out_png * 255).astype(np.uint8)
-Image.fromarray(out_png).save(r'C:\Dev\GIMP_Native_Plugin\Gimp-restoration-plugin\out1.png')
+Image.fromarray(out_png).save(str(REPO / "out1.png"))
 print('saved out1.png (clipped [0, 1] from raw output)')
 
 # Same for normalized input
 out_n_png = np.clip((out_n_crop + 1) / 2, 0, 1)[0].transpose(1, 2, 0)
 out_n_png = (out_n_png * 255).astype(np.uint8)
-Image.fromarray(out_n_png).save(r'C:\Dev\GIMP_Native_Plugin\Gimp-restoration-plugin\out2.png')
+Image.fromarray(out_n_png).save(str(REPO / "out2.png"))
 print('saved out2.png (from [-1, 1] input, shifted back)')

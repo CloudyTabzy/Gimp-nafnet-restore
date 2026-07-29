@@ -13,6 +13,7 @@ synthetic image. If both pass, the GIMP-side should not raise
 "Invalid type" on RGB or RGBA inputs.
 """
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -21,7 +22,15 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-INSTALL_DIR = Path(r"C:\Users\User\AppData\Roaming\GIMP\3.2\plug-ins\nafnet-restore")
+# Cross-platform path to the deployed plug-in directory. On
+# Windows, the per-user GIMP plug-in directory is under %APPDATA%.
+# On other platforms, fall back to ~/.config (XDG-style default).
+if os.name == "nt":
+    _config_root = Path(os.environ["APPDATA"]) / "GIMP" / "3.2" / "plug-ins"
+else:
+    _config_root = Path.home() / ".config" / "GIMP" / "3.2" / "plug-ins"
+
+INSTALL_DIR = _config_root / "nafnet-restore"
 WORKER = INSTALL_DIR / "nafnet_worker.py"
 MODEL = INSTALL_DIR / "nafnet-REDS-width64_v1.onnx"
 cfg = json.loads((INSTALL_DIR / "nafnet_config.json").read_text())

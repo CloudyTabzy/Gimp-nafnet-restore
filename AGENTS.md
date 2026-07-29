@@ -118,7 +118,8 @@ Before making any meaningful change, read in this order:
 
 For the bigger cross-project context (external reference checkouts,
 pitfalls docs that don't belong in the repo, session history), look
-at the parent workspace directory (`C:\Dev\GIMP_Native_Plugin\`).
+at the parent workspace directory (the directory that contains
+this repo, e.g. one level up from the project root).
 
 ---
 

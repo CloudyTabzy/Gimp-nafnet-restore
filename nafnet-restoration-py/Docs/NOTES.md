@@ -374,9 +374,10 @@ seconds instead of hours.
 
 - **Native GIMP plug-in via Zig** - rewrite the plug-in in C/C++
   compiled with Zig targeting MINGW, statically link ORT CPU, no
-  Python anywhere. See `C:\Dev\GIMP_Native_Plugin\GOAL-Native-GIMP-Plugin-via-Zig.md`
-  for the feasibility analysis. Cost: real C build pipeline, more
-  brittle deploy, lost cross-platform Python tooling. Only worth
+  Python anywhere. See `GOAL-Native-GIMP-Plugin-via-Zig.md` (in
+  the parent workspace directory) for the feasibility analysis.
+  Cost: real C build pipeline, more brittle deploy, lost
+  cross-platform Python tooling. Only worth
   doing if the sidecar architecture proves fragile on a real
   GIMP 3.4 / GIMP 4 transition.
 - **GPU plug-in** - if the user can ever get DirectML or CUDA
@@ -509,8 +510,9 @@ negligible (one extra `gegl:component-extract` call per restore).
 - `AGENTS.md` at the project root - project conventions and rules.
 - `README.md` - user-facing install and usage docs.
 - `nafnet-worker-rs/OPTIMIZATION.md` - Rust worker post-mortem.
-- `C:\Dev\GIMP_Native_Plugin\Gimp-lama-inpainting\Docs\NOTES.md` -
-  the sibling plug-in's lessons. Most of the MINGW/MSVC, sidecar,
-  and `.interp` lessons are shared between the two plug-ins.
+- `Gimp-lama-inpainting/Docs/NOTES.md` (in the parent workspace
+  directory) - the sibling plug-in's lessons. Most of the
+  MINGW/MSVC, sidecar, and `.interp` lessons are shared between
+  the two plug-ins.
 - GIMP 3.x plug-in pitfalls (workspace root) - broader GIMP
   development traps.

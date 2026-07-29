@@ -1,5 +1,14 @@
+"""Dump the NAFNet model inputs / outputs / metadata.
+
+Run from anywhere; the model is located relative to this
+file's directory (the model is not committed -- see
+``install.bat`` and ``.gitignore``; download via HuggingFace).
+"""
 import onnx
-m = onnx.load(r'C:\Dev\GIMP_Native_Plugin\Gimp-restoration-plugin\NAFNet-REDS-width64_v1.onnx')
+from pathlib import Path
+
+MODEL = Path(__file__).resolve().parent.parent / "NAFNet-REDS-width64_v1.onnx"
+m = onnx.load(str(MODEL))
 print('Producer:', m.producer_name, m.producer_version)
 print('Opset:', m.opset_import[0].version)
 print('IR version:', m.ir_version)
