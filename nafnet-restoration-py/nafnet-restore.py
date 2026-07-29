@@ -113,6 +113,38 @@ def _stderr(msg):
 _stderr(f"module loaded: nafnet-restore.py (pid={_os_for_pid.getpid()})")
 
 
+# Stale .pyc detection. If a `__pycache__` directory next to this
+# file holds a .pyc compiled by a different Python version (e.g.,
+# Python 3.13 left behind by running the test pipeline, while GIMP
+# uses Python 3.14), the import silently fails. Detect that and
+# print a clear instruction to stderr. The Gimp-side plug-in manager
+# catches stderr at scan time, so the message reaches the Error
+# Console and the terminal.
+import sys as _sys_version_check
+_py_version = "%d%d" % _sys_version_check.version_info[:2]
+_pycache_dir = _os_for_pid.path.join(_os_for_pid.path.dirname(__file__), "__pycache__")
+if _os_for_pid.path.isdir(_pycache_dir):
+    for _pyc_name in _os_for_pid.listdir(_pycache_dir):
+        if _pyc_name.endswith(".pyc") and not _pyc_name.startswith(
+            _os_for_pid.path.basename(__file__).rsplit(".", 1)[0]
+            + ".cpython-" + _py_version
+        ):
+            _stderr(
+                f"WARNING: stale bytecode detected: "
+                f"{_pycache_dir}\\{_pyc_name}\n"
+                f"  This .pyc was not compiled for the current Python "
+                f"(expected cpython-{_py_version}). If GIMP silently "
+                f"fails to register the plug-in after a code change, "
+                f"delete the __pycache__ directory and restart GIMP:\n"
+                f"    Remove-Item -Recurse -Force {_pycache_dir}"
+            )
+            break
+# No `del` needed: these are local function-level names, Python's
+# reference counting cleans them up when this scope exits. (Adding a
+# `del` here would crash with NameError if the for-loop above had
+# zero iterations, because `_pyc_name` would never have been bound.)
+
+
 def _log(msg: str) -> None:
     """Append a timestamped line to the plug-in log file.
 
