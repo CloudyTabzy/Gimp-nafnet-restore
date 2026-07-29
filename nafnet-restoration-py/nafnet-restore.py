@@ -249,6 +249,58 @@ def _run_subprocess(command):
     return subprocess.run(command, **kwargs)
 
 
+def _pulse_during_subprocess(command, phase_text="Working..."):
+    """Run a subprocess while pulsing the GIMP progress bar.
+
+    A daemon thread calls ``Gimp.progress_pulse()`` and
+    ``Gimp.progress_set_text(phase_text)`` every 250 ms. The
+    pulse continues until the subprocess completes (or times
+    out, or raises).
+
+    This is the **cheap path** for progress feedback: zero
+    changes to the worker, no protocol parsing, just a thread
+    on the GIMP side. The downside is that the bar moves
+    without a real fraction — GIMP shows the "infinite
+    progress" animation, which is the right UX for an
+    indeterminate task (longer than 2 s, no known total).
+
+    All Gimp.progress calls go through ``_safe_progress`` so a
+    thread-safety issue or a non-interactive GIMP context
+    degrades to "no pulse" rather than a crash. The daemon
+    thread is ``daemon=True`` so it cannot block the plug-in
+    from exiting.
+
+    The informative path (per-tile progress) is deferred — it
+    requires the Rust worker to emit ``[LAMA_MARKER] phase
+    tile <i>/<n>`` on stderr and the GIMP-side to parse them,
+    which is a Rust rebuild.
+    """
+    stop_event = threading.Event()
+
+    def _pulse_loop():
+        # ``stop_event.wait(timeout)`` returns True when the
+        # event is set, False on timeout. Looping with
+        # ``wait`` instead of ``sleep`` makes shutdown
+        # immediate when the worker completes.
+        while not stop_event.is_set():
+            _safe_progress(Gimp.progress_pulse)
+            _safe_progress(Gimp.progress_set_text, phase_text)
+            if stop_event.wait(0.25):
+                break
+
+    pulse_thread = threading.Thread(
+        target=_pulse_loop, name="nafnet-progress-pulse", daemon=True,
+    )
+    pulse_thread.start()
+    try:
+        return _run_subprocess(command)
+    finally:
+        stop_event.set()
+        # ``join`` with a timeout so a stuck pulse loop can
+        # never delay the plug-in past the worker timeout.
+        pulse_thread.join(timeout=WORKER_TIMEOUT_SECONDS + 5)
+
+
 def _process_detail(completed):
     output = (completed.stderr or completed.stdout or "").strip()
     if not output:
@@ -868,8 +920,12 @@ class NafnetRestore(Gimp.PlugIn):
                     else:
                         _log("worker: python (single-pass; may OOM on >1 Mpix)")
 
-                    _log("_run_whole: spawning worker (no progress callback)")
-                    completed = _run_subprocess(command)
+                    _log("_run_whole: spawning worker (with progress pulse)")
+                    completed = _pulse_during_subprocess(
+                        command,
+                        phase_text="Running NAFNet inference "
+                                  "(~30 s for 2K images)...",
+                    )
                     _log("_run_whole: worker rc=" + str(completed.returncode))
                     if completed.returncode != 0:
                         _log("_run_whole: worker stderr:\n" + (completed.stderr or "<empty>"))
