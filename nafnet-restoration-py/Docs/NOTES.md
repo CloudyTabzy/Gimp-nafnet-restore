@@ -232,7 +232,7 @@ huge complication at the worker for high-resolution images.
 **Why tile size 512?** It matches the dghs-imgutils default. Larger
 tiles (768, 1024) give marginally better quality (the model sees
 more spatial context) at much higher memory cost. 512 is a
-reasonable default for a 4 GB VRAM RTX 4050. The tile size is
+reasonable default for a 4 GB VRAM GPU. The tile size is
 exposed as `--tile-size` so users with more memory can override
 at the command line.
 

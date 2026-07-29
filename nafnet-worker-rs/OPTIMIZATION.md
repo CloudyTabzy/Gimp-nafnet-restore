@@ -177,9 +177,9 @@ Session::builder()
 The NAFNet CPU worker is at its perf ceiling on this machine.
 The inference is the bottleneck. Further speedup requires:
 
-- **GPU acceleration** (DirectML on the RTX 4050 has known ABI
-  issues with the prebuilt ORT 1.24.2 binary; CUDA needs an
-  NVIDIA driver + Toolkit; WebGPU/Dawn is experimental). All
+- **GPU acceleration** (DirectML has known ABI issues with
+  the prebuilt ORT 1.24.2 binary; CUDA needs an NVIDIA driver
+  + Toolkit; WebGPU/Dawn is experimental). All
   three are out of scope for the sidecar.
 - **A smaller / distilled / faster model** (e.g., NAFNet width=16
   instead of width=64). The width=16 variant is 4× smaller and
