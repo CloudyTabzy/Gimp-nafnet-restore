@@ -1,8 +1,10 @@
 # Model and worker binary
 # nafnet-REDS-width64_v1.onnx is downloaded by install.bat from
-# HuggingFace. Don't commit it (275 MB) — install.bat transparently
-# fetches it on first run.
-NAFNet-REDS-width64_v1.onnx
+# HuggingFace. Don't commit it (275 MB) - install.bat transparently
+# fetches it on first run. The wildcard covers both the top-level
+# file and any stage copies in subdirs.
+*.onnx
+nafnet-restoration-py/*.onnx
 
 # User-specific worker config. install.bat writes this with the
 # worker's resolved Python path; the deployed copy at
@@ -24,3 +26,11 @@ __pycache__/
 
 # Test output
 tests/outputs/
+
+# Editor / OS junk (defensive — no current files match, but prevents
+# accidental commits if someone develops on a different platform)
+*.bak
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
