@@ -1188,22 +1188,25 @@ class NafnetRestore(Gimp.PlugIn):
 
                     _phase("Cropping to selection + context...", 0.10)
                     # Crop the drawable's shadow buffer to the ROI
-                    # and save. Same GEGL pattern as the alpha
-                    # rebuild: buffer-source -> gegl:rectangle ->
-                    # png-save, with saver.process() at the end. The
-                    # OLD code tried `crop.get_property("buffer")`
-                    # which silently fails because gegl:rectangle
-                    # has no `buffer` property (its only props are
-                    # x/y/width/height/color -- output flows through
-                    # pads, not properties). Same root cause as the
-                    # alpha "Invalid type" error.
+                    # and save. Pipeline: buffer-source -> gegl:crop
+                    # -> png-save, with saver.process() at the end.
+                    # We use ``gegl:crop`` directly (NOT
+                    # ``gegl:rectangle``, which is a render op that
+                    # draws a green rectangle of the requested size
+                    # regardless of the input -- the previous version
+                    # used it here and the worker ended up processing
+                    # a green rectangle, so the user saw no visible
+                    # difference between Restore Image and Restore
+                    # Selection when the selection was the whole
+                    # image). Same root cause as the alpha and
+                    # paste-pipeline bugs.
                     _log("_run_region: getting shadow buffer (has_alpha=" + str(has_alpha) + ")")
                     full_shadow = drawable.get_shadow_buffer()
                     _log("_run_region: shadow buffer obtained")
                     graph = Gegl.Node()
                     source = graph.create_child("gegl:buffer-source")
                     source.set_property("buffer", full_shadow)
-                    crop = graph.create_child("gegl:rectangle")
+                    crop = graph.create_child("gegl:crop")
                     crop.set_property("x", float(roi_x))
                     crop.set_property("y", float(roi_y))
                     crop.set_property("width", float(roi_w))
