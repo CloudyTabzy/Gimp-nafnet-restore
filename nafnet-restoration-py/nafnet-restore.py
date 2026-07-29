@@ -3,8 +3,8 @@
 
 Exposes two image-scoped procedures that share this single shebang alias:
 
-- ``plug-in-nafnet-restore`` — restore the entire active drawable.
-- ``plug-in-nafnet-restore-region`` — restore only the selected
+- ``plug-in-nafnet-restore`` ΓÇö restore the entire active drawable.
+- ``plug-in-nafnet-restore-region`` ΓÇö restore only the selected
   region (uses the selection bbox with a small context padding so
   the model has surrounding pixels to inform the restoration).
 
@@ -15,13 +15,13 @@ loads the PNG back into the drawable's shadow buffer and merges.
 Architecture mirrors the LaMa plug-in:
 
   GIMP process  (MINGW Python 3.14, gi + GEGL only)
-    └─ #!nafnet-gimp-python  (shebang → user-level .interp mapping)
-         └─ nafnet-restore.py
-              ├─ exports drawable (+ optional selection mask) to temp PNGs
-              ├─ spawns nafnet_worker_rust.exe (default) or nafnet_worker.py
-              └─ loads result PNG into drawable shadow buffer, merge_shadow
-                        │
-                        ▼
+    ΓööΓöÇ #!nafnet-gimp-python  (shebang ΓåÆ user-level .interp mapping)
+         ΓööΓöÇ nafnet-restore.py
+              Γö£ΓöÇ exports drawable (+ optional selection mask) to temp PNGs
+              Γö£ΓöÇ spawns nafnet_worker_rust.exe (default) or nafnet_worker.py
+              ΓööΓöÇ loads result PNG into drawable shadow buffer, merge_shadow
+                        Γöé
+                        Γû╝
              worker process  (Rust or Python, with Pillow + onnxruntime)
                  ort CPU provider
                  ?? model pipeline: load PNG -> HWC f32 [0, 1] -> (Rust:
@@ -78,71 +78,6 @@ SELECTION_CONTEXT_PX = 64
 
 WORKER_TIMEOUT_SECONDS = 600  # large images with tiling can be slow
 WORKER_POLL_INTERVAL_SECONDS = 0.25
-
-
-# --- diagnostic infrastructure -----------------------------------------
-# Write a timestamped line to sys.stderr with explicit flush.
-# GIMP captures the plug-in's stderr (via the wire protocol) and
-# surfaces it in the *Error Console* (Windows > Error Console)
-# when stderr is a TTY. From a non-TTY environment (e.g., user
-# launches GIMP from a terminal), stderr lines appear in real
-# time on the terminal. The ``flush=True`` is critical: GIMP may
-# kill the plug-in child before its buffers are flushed, in which
-# case unflushed output is lost.
-import os as _os_for_pid
-import sys as _sys_for_stderr
-import time as _t_for_stderr
-
-
-def _stderr(msg):
-    ts = _t_for_stderr.strftime("%H:%M:%S")
-    # Use the stderr FileObject directly. The ``sys`` module
-    # itself doesn't have a ``.write`` method — only the ``sys.stderr``
-    # and ``sys.stdout`` FileObjects do. ``flush=True`` is required
-    # because GIMP may kill the plug-in child before its buffers
-    # are flushed, in which case the diagnostic output is lost.
-    _sys_for_stderr.stderr.write(f"[nafnet {ts}] {msg}\n")
-    _sys_for_stderr.stderr.flush()
-
-
-# Module-load marker. If the user launches GIMP from a terminal
-# and the plug-in file is being loaded, this line should appear
-# immediately. If it doesn't, the file is not being executed at
-# all (likely a wrong shebang / .interp mapping, or the plug-in
-# is in the wrong directory).
-_stderr(f"module loaded: nafnet-restore.py (pid={_os_for_pid.getpid()})")
-
-
-# Stale .pyc detection. If a `__pycache__` directory next to this
-# file holds a .pyc compiled by a different Python version (e.g.,
-# Python 3.13 left behind by running the test pipeline, while GIMP
-# uses Python 3.14), the import silently fails. Detect that and
-# print a clear instruction to stderr. The Gimp-side plug-in manager
-# catches stderr at scan time, so the message reaches the Error
-# Console and the terminal.
-import sys as _sys_version_check
-_py_version = "%d%d" % _sys_version_check.version_info[:2]
-_pycache_dir = _os_for_pid.path.join(_os_for_pid.path.dirname(__file__), "__pycache__")
-if _os_for_pid.path.isdir(_pycache_dir):
-    for _pyc_name in _os_for_pid.listdir(_pycache_dir):
-        if _pyc_name.endswith(".pyc") and not _pyc_name.startswith(
-            _os_for_pid.path.basename(__file__).rsplit(".", 1)[0]
-            + ".cpython-" + _py_version
-        ):
-            _stderr(
-                f"WARNING: stale bytecode detected: "
-                f"{_pycache_dir}\\{_pyc_name}\n"
-                f"  This .pyc was not compiled for the current Python "
-                f"(expected cpython-{_py_version}). If GIMP silently "
-                f"fails to register the plug-in after a code change, "
-                f"delete the __pycache__ directory and restart GIMP:\n"
-                f"    Remove-Item -Recurse -Force {_pycache_dir}"
-            )
-            break
-# No `del` needed: these are local function-level names, Python's
-# reference counting cleans them up when this scope exits. (Adding a
-# `del` here would crash with NameError if the for-loop above had
-# zero iterations, because `_pyc_name` would never have been bound.)
 
 
 def _log(msg: str) -> None:
@@ -532,13 +467,13 @@ def paste_roi_into_shadow(
     3. Translates by (sel_x - context_px, sel_y - context_px) so
        the output rectangle lands at (sel_x, sel_y) in the
        drawable's coordinate system.
-    4. Writes to the shadow buffer at origin (sel_x, sel_y) —
+    4. Writes to the shadow buffer at origin (sel_x, sel_y) ΓÇö
        only the inner selection bbox is touched, the rest of the
        shadow buffer is untouched.
 
     Without the crop, the user would see a 64 px "halo" of restored
     pixels around their selection (the context ring) plus the
-    result would be written at (0, 0) instead of (sel_x, sel_y) — a
+    result would be written at (0, 0) instead of (sel_x, sel_y) ΓÇö a
     double bug. The translate fixes the position; the rectangle
     drops the context ring.
     """
@@ -579,17 +514,18 @@ def extract_alpha_png(src_buffer, path):
 
     Used to preserve the original alpha through the sidecar: the
     GIMP side extracts the alpha, the worker combines it with the
-    model's RGB output, and the GIMP side loads the combined RGBA back.
+    model's RGB output, the GIMP side loads the combined RGBA back.
 
     The extracted buffer is a single-channel Y u8. `save_buffer_as_png`
     saves whatever format the buffer is in, so this produces a
     grayscale PNG.
 
-    **Caller must verify the source buffer has an alpha channel**
-    first (via `_drawable_has_alpha`). Calling this on an RGB buffer
-    fails with \"Invalid type\" because the GEGL buffer has no
-    alpha component to extract. This is the bug that surfaced in
-    the first round of testing.
+    The caller MUST only invoke this when the drawable actually has
+    an alpha channel (use `drawable.has_alpha()`). For RGB / GRAY
+    drawables the GEGL extract would either error or silently
+    produce a zero-valued buffer; instead, the caller should pass
+    `alpha_path=None` to the worker, which will fall back to the
+    input PNG's alpha (all 255 for RGB images).
     """
     graph = Gegl.Node()
     source = graph.create_child("gegl:buffer-source")
@@ -599,33 +535,6 @@ def extract_alpha_png(src_buffer, path):
     extract.link(source)
     extract.process()
     save_buffer_as_png(extract.get_property("buffer"), path)
-
-
-def _drawable_has_alpha(drawable):
-    """Return True if the active drawable's image has an alpha channel.
-
-    Looks at the image's base type (Gimp.ImageBaseType) rather than
-    the drawable's type. The base type tells us the image's color
-    space: RGB / GRAY / INDEXED have no alpha; RGBA / GRAYA /
-    INDEXEDA do. For our 1:1 image-restoration use case, this is
-    the right check — it tells us whether the alpha round-trip is
-    meaningful for the image the user is restoring.
-
-    Implementation notes:
-    - C API equivalent: ``gimp_image_get_base_type()`` in
-      ``libgimp/gimpimage_pdb.h`` (returns ``GimpImageBaseType``).
-    - The drawable-level ``gimp_drawable_type_with_alpha()`` is
-      also available, but it forces RGBA on indexed drawables which
-      isn't what we want. The image's base type is the right
-      property to check.
-    """
-    image = drawable.get_image()
-    base_type = image.get_base_type()
-    return base_type in (
-        Gimp.ImageBaseType.RGBA,
-        Gimp.ImageBaseType.GRAYA,
-        Gimp.ImageBaseType.INDEXEDA,
-    )
 
 
 def _return_error(procedure, status, message):
@@ -661,16 +570,13 @@ def _safe_progress(callable_, *args, **kwargs):
 
 class NafnetRestore(Gimp.PlugIn):
     def do_set_i18n(self, _name):
-        _stderr("do_set_i18n called")
         return False
 
     def do_query_procedures(self):
-        procs = [
+        return [
             "plug-in-nafnet-restore",
             "plug-in-nafnet-restore-region",
         ]
-        _stderr(f"do_query_procedures -> {procs}")
-        return procs
 
     def _create_procedure(self, name, menu_label, blurb):
         Gegl.init(None)
@@ -709,29 +615,29 @@ class NafnetRestore(Gimp.PlugIn):
                 "drawable. ~9 s per 1024x1024 tile. Best for general "
                 "deblurring and restoration of natural photographs.",
             )
-        if name == "plug-in-nafnet-restore-region":
-            return self._create_procedure(
-                name,
-                "_Restore Selection (NAFNet)...",
-                "Run NAFNet image restoration only inside the active "
-                "selection. A small context padding is added around "
-                "the selection bbox so the model has surrounding "
-                "pixels to inform the restoration. Pixels outside the "
-                "original selection are not modified.",
-            )
+        # Region mode is stubbed for now — see NOTES.md.
         return None
 
     def run(self, procedure, run_mode, image, drawables, config, run_data):
+        name = procedure.get_name()
+        _log(
+            "run: name=" + repr(name)
+            + " run_mode=" + repr(run_mode)
+            + " image=" + repr(image)
+            + " drawables=" + repr(len(drawables) if drawables else 0)
+        )
         try:
-            name = procedure.get_name()
-            n = len(drawables) if drawables is not None else 0
-            _stderr(f"run() called: name={name!r} drawables={n}")
+            if name == "plug-in-nafnet-restore-region":
+                return self._run_region(procedure, run_mode, image, drawables)
+            return self._run_whole(procedure, run_mode, image, drawables)
         except Exception as exc:
-            _stderr(f"run() entry failed: {type(exc).__name__}: {exc}")
-            raise
-        if name == "plug-in-nafnet-restore-region":
-            return self._run_region(procedure, run_mode, image, drawables)
-        return self._run_whole(procedure, run_mode, image, drawables)
+            import traceback as _tb
+            _log("run: UNCAUGHT EXCEPTION " + type(exc).__name__ + ": " + str(exc))
+            for line in _tb.format_exc().splitlines():
+                _log("  | " + line)
+            return _execution_error(
+                procedure, "NAFNet plug-in crashed: " + str(exc),
+            )
 
     # ----------------- Worker backend -----------------
 
@@ -776,7 +682,6 @@ class NafnetRestore(Gimp.PlugIn):
         No selection interaction: the model processes the full
         drawable. Use for whole-image deblurring.
         """
-        _stderr("_run_whole entered")
         progress_started = False
 
         def _phase(text, fraction):
@@ -805,8 +710,10 @@ class NafnetRestore(Gimp.PlugIn):
                 )
 
             drawable = drawables[0]
+            _log("_run_whole: drawable type=" + str(type(drawable).__name__))
             width = drawable.get_width()
             height = drawable.get_height()
+            _log("_run_whole: drawable size=" + str(width) + "x" + str(height))
             if width <= 0 or height <= 0:
                 return _calling_error(procedure, "The active drawable is empty.")
 
@@ -816,109 +723,80 @@ class NafnetRestore(Gimp.PlugIn):
                     f"NAFNet model is missing: {MODEL_PATH}. Reinstall the plug-in.",
                 )
 
-            has_alpha = _drawable_has_alpha(drawable)
-            _log(
-                f"whole-restore: drawable={width}x{height} "
-                f"has_alpha={has_alpha} "
-                f"image.get_base_type()={image.get_base_type()!r}"
-            )
-
             _safe_progress(Gimp.progress_init, "NAFNet Restore")
             progress_started = True
             _phase("Preparing image...", 0.05)
 
             try:
                 with tempfile.TemporaryDirectory(prefix="gimp-nafnet-") as temp_dir:
+                    _log("_run_whole: temp_dir=" + temp_dir)
                     image_path = os.path.join(temp_dir, "image.png")
                     output_path = os.path.join(temp_dir, "result.png")
 
-                    _phase("Preparing image...", 0.10)
-                    # Save the drawable buffer. The buffer is
-                    # whatever format the drawable uses (RGB or
-                    # RGBA). The worker reads only the RGB channels;
-                    # the alpha (if any) is preserved separately.
+                    _log("_run_whole: drawable.get_buffer()")
                     full_buffer = drawable.get_buffer()
-                    _log(f"whole-restore: buffer.get_format()={full_buffer.get_format()!r}")
+                    _log("_run_whole: save_buffer_as_png(image.png)")
+                    save_buffer_as_png(full_buffer, image_path)
+                    _log("_run_whole: image.png saved")
 
-                    image_alpha = None
-                    if has_alpha:
-                        # RGBA image: extract the alpha channel
-                        # so the worker can combine it with the
-                        # model's RGB output. For RGB images,
-                        # there's no alpha component to extract;
-                        # calling `gegl:component-extract` on an
-                        # RGB buffer fails with "Invalid type".
-                        image_alpha = os.path.join(temp_dir, "alpha.png")
-                        extract_alpha_png(full_buffer, image_alpha)
-                        _log(f"whole-restore: alpha extracted to {image_alpha}")
-                    else:
-                        _log("whole-restore: no alpha (RGB image), skipping alpha round-trip")
-
-                    _phase("Starting NAFNet worker...", 0.20)
-                    try:
-                        command, use_rust = self._resolve_worker_command(
-                            image_path, output_path, alpha_path=image_alpha,
+                    _phase("Running NAFNet worker (python)...", 0.20)
+                    # Use Python worker directly. No alpha, no rust.
+                    if not os.path.isfile(WORKER_SCRIPT):
+                        return _execution_error(
+                            procedure,
+                            f"Worker script is missing: {WORKER_SCRIPT}.",
                         )
-                    except FileNotFoundError as exc:
-                        return _execution_error(procedure, str(exc))
+                    try:
+                        worker_python = find_worker_python()
                     except RuntimeError as exc:
                         return _calling_error(procedure, str(exc))
+                    command = [
+                        worker_python, WORKER_SCRIPT,
+                        "--image", image_path,
+                        "--output", output_path,
+                        "--model", MODEL_PATH,
+                    ]
+                    _log("_run_whole: command=" + " ".join(command))
 
-                    _log(f"whole-restore: command ({len(command)} args): {' '.join(command)}")
-                    if use_rust:
-                        _log("worker: rust")
-                    else:
-                        _log("worker: python")
-
-                    try:
-                        completed = _run_worker_with_progress(
-                            command, _worker_progress_callback
-                        )
-                    except OSError as exc:
-                        return _execution_error(
-                            procedure,
-                            f"Could not start the NAFNet worker: {exc}",
-                        )
-
-                    # Log the worker's full output (marker lines) for
-                    # the diagnostic log. On failure, the stderr is
-                    # already in completed.stdout (we merged them).
-                    if completed.stdout:
-                        for line in completed.stdout.splitlines():
-                            if line.strip():
-                                _log(f"worker: {line.strip()}")
-
-                    if completed.timed_out:
-                        return _execution_error(
-                            procedure,
-                            f"The NAFNet worker timed out after "
-                            f"{WORKER_TIMEOUT_SECONDS} seconds.",
-                        )
+                    _log("_run_whole: spawning worker (no progress callback)")
+                    completed = _run_subprocess(command)
+                    _log("_run_whole: worker rc=" + str(completed.returncode))
                     if completed.returncode != 0:
+                        _log("_run_whole: worker stderr:\n" + (completed.stderr or "<empty>"))
+                        _log("_run_whole: worker stdout:\n" + (completed.stdout or "<empty>"))
                         return _execution_error(
                             procedure,
-                            "The NAFNet worker failed: "
-                            + _process_detail(completed),
+                            "The NAFNet worker failed: " + _process_detail(completed),
                         )
                     if not os.path.isfile(output_path):
+                        _log("_run_whole: worker did not create " + output_path)
                         return _execution_error(
                             procedure,
                             "The NAFNet worker did not create its output PNG.",
                         )
 
-                    _phase("Applying result...", 0.90)
+                    _phase("Loading result...", 0.90)
+                    _log("_run_whole: load_png_into_shadow")
                     load_png_into_shadow(drawable, output_path, width, height)
+                    _log("_run_whole: load_png_into_shadow done")
 
-                # Refresh the entire drawable — the whole image was
+                # Refresh the entire drawable ΓÇö the whole image was
                 # replaced. We do not constrain the update to a
                 # region because for whole-image mode every pixel
                 # may have changed.
+                _log("_run_whole: merge_shadow + update + displays_flush")
                 drawable.merge_shadow(True)
                 drawable.update(0, 0, width, height)
                 Gimp.displays_flush()
+                _log("_run_whole: paste + flush done")
             except (OSError, RuntimeError, ValueError) as exc:
+                _log("_run_whole: image transfer caught exception: " + type(exc).__name__ + ": " + str(exc))
                 return _execution_error(procedure, f"NAFNet image transfer failed: {exc}")
             except Exception as exc:
+                import traceback as _tb
+                _log("_run_whole: outer caught exception: " + type(exc).__name__ + ": " + str(exc))
+                for line in _tb.format_exc().splitlines():
+                    _log("  | " + line)
                 return _execution_error(procedure, f"NAFNet Restore failed: {exc}")
 
             _phase("Complete", 1.0)
@@ -939,7 +817,6 @@ class NafnetRestore(Gimp.PlugIn):
         drawable with the original selection bbox as the destination.
         Pixels outside the original selection bbox are not modified.
         """
-        _stderr("_run_region entered")
         progress_started = False
 
         def _phase(text, fraction):
@@ -968,7 +845,9 @@ class NafnetRestore(Gimp.PlugIn):
                 )
 
             drawable = drawables[0]
+            _log("_run_region: drawable type=" + str(type(drawable).__name__))
             intersects, sel_x, sel_y, sel_w, sel_h = drawable.mask_intersect()
+            _log("_run_region: mask_intersect=" + repr((intersects, sel_x, sel_y, sel_w, sel_h)))
             if not intersects:
                 return _calling_error(
                     procedure,
@@ -977,6 +856,7 @@ class NafnetRestore(Gimp.PlugIn):
 
             width = drawable.get_width()
             height = drawable.get_height()
+            _log("_run_region: drawable size=" + str(width) + "x" + str(height))
             if width <= 0 or height <= 0:
                 return _calling_error(procedure, "The active drawable is empty.")
 
@@ -985,14 +865,6 @@ class NafnetRestore(Gimp.PlugIn):
                     procedure,
                     f"NAFNet model is missing: {MODEL_PATH}. Reinstall the plug-in.",
                 )
-
-            has_alpha = _drawable_has_alpha(drawable)
-            _log(
-                f"region-restore: drawable={width}x{height} "
-                f"has_alpha={has_alpha} "
-                f"image.get_base_type()={image.get_base_type()!r} "
-                f"selection={sel_x},{sel_y} {sel_w}x{sel_h}"
-            )
 
             # Compute the expanded ROI in original-image pixel
             # coordinates. The bbox+context is the region the model
@@ -1004,10 +876,8 @@ class NafnetRestore(Gimp.PlugIn):
             roi_w = min(width, sel_x + sel_w + ctx) - roi_x
             roi_h = min(height, sel_y + sel_h + ctx) - roi_y
 
-            _log(
-                f"region-restore: ROI {roi_x},{roi_y} {roi_w}x{roi_h} "
-                f"(selection + {ctx}px context)"
-            )
+            _log(f"region-restore: selection {sel_x},{sel_y} {sel_w}x{sel_h}, "
+                 f"ROI {roi_x},{roi_y} {roi_w}x{roi_h}")
 
             _safe_progress(Gimp.progress_init, "NAFNet Restore Region")
             progress_started = True
@@ -1015,18 +885,22 @@ class NafnetRestore(Gimp.PlugIn):
 
             try:
                 with tempfile.TemporaryDirectory(prefix="gimp-nafnet-region-") as temp_dir:
+                    _log("_run_region: temp_dir=" + temp_dir)
                     image_path = os.path.join(temp_dir, "region.png")
+                    has_alpha = drawable.has_alpha()
+                    alpha_path = os.path.join(temp_dir, "alpha.png") if has_alpha else None
                     output_path = os.path.join(temp_dir, "result.png")
 
                     _phase("Cropping to selection + context...", 0.10)
                     # Crop the drawable's shadow buffer to the ROI
                     # and save. GEGL's buffer-source + gegl:rectangle
                     # handles the sub-region extraction. We also
-                    # extract the alpha channel separately (when
+                    # extract the alpha channel separately (only if
                     # the drawable has one) so the worker can
                     # preserve it through the round-trip.
+                    _log("_run_region: getting shadow buffer (has_alpha=" + str(has_alpha) + ")")
                     full_shadow = drawable.get_shadow_buffer()
-                    _log(f"region-restore: full_shadow.get_format()={full_shadow.get_format()!r}")
+                    _log("_run_region: shadow buffer obtained")
                     graph = Gegl.Node()
                     source = graph.create_child("gegl:buffer-source")
                     source.set_property("buffer", full_shadow)
@@ -1036,65 +910,59 @@ class NafnetRestore(Gimp.PlugIn):
                     crop.set_property("width", float(roi_w))
                     crop.set_property("height", float(roi_h))
                     crop.link(source)
+                    _log("_run_region: running gegl:rectangle crop")
                     crop.process()
+                    _log("_run_region: crop done; reading buffer")
                     cropped = crop.get_property("buffer")
-                    _log(f"region-restore: cropped.get_format()={cropped.get_format()!r}")
+                    _log("_run_region: cropped buffer obtained")
                     # Save the cropped region. `save_buffer_as_png`
                     # writes whatever format the buffer is in (RGBA
                     # if the drawable is RGBA, RGB otherwise). The
                     # worker reads RGB channels; the original alpha
                     # is preserved separately via the alpha.png
                     # side channel.
+                    _log("_run_region: saving region.png to " + image_path)
                     save_buffer_as_png(cropped, image_path)
-
-                    image_alpha = None
                     if has_alpha:
-                        # RGBA image: extract the alpha channel so
-                        # the worker can combine it with the model's
-                        # RGB output. For RGB images there's no
-                        # alpha component to extract; calling
-                        # `gegl:component-extract` on an RGB buffer
-                        # fails with "Invalid type".
-                        image_alpha = os.path.join(temp_dir, "alpha.png")
-                        extract_alpha_png(cropped, image_alpha)
-                        _log(f"region-restore: alpha extracted to {image_alpha}")
+                        _log("_run_region: region.png saved; extracting alpha")
+                        extract_alpha_png(cropped, alpha_path)
+                        _log("_run_region: alpha.png extracted")
                     else:
-                        _log("region-restore: no alpha (RGB image), skipping alpha round-trip")
+                        _log("_run_region: no alpha to extract (RGB drawable); worker will use input alpha")
 
                     _phase("Starting NAFNet worker...", 0.20)
+                    _log("_run_region: resolving worker command")
                     try:
                         command, use_rust = self._resolve_worker_command(
-                            image_path, output_path, alpha_path=image_alpha,
+                            image_path, output_path, alpha_path=alpha_path,
                         )
                     except FileNotFoundError as exc:
+                        _log("_run_region: worker FileNotFoundError: " + str(exc))
                         return _execution_error(procedure, str(exc))
                     except RuntimeError as exc:
+                        _log("_run_region: worker RuntimeError: " + str(exc))
                         return _calling_error(procedure, str(exc))
 
-                    _log(f"region-restore: command ({len(command)} args): {' '.join(command)}")
+                    _log("_run_region: command=" + " ".join(command))
                     if use_rust:
                         _log("worker: rust")
                     else:
                         _log("worker: python")
 
                     try:
+                        _log("_run_region: spawning worker")
                         completed = _run_worker_with_progress(
                             command, _worker_progress_callback
                         )
                     except OSError as exc:
+                        _log("_run_region: spawn OSError: " + str(exc))
                         return _execution_error(
                             procedure,
                             f"Could not start the NAFNet worker: {exc}",
                         )
 
-                    # Log the worker's full output (marker lines) for
-                    # the diagnostic log. On failure, the stderr is
-                    # already in completed.stdout (we merged them).
-                    if completed.stdout:
-                        for line in completed.stdout.splitlines():
-                            if line.strip():
-                                _log(f"worker: {line.strip()}")
-
+                    _log("_run_region: worker exited rc=" + str(completed.returncode)
+                         + " timed_out=" + str(completed.timed_out))
                     if completed.timed_out:
                         return _execution_error(
                             procedure,
@@ -1102,12 +970,14 @@ class NafnetRestore(Gimp.PlugIn):
                             f"{WORKER_TIMEOUT_SECONDS} seconds.",
                         )
                     if completed.returncode != 0:
+                        _log("_run_region: worker stderr:\n" + (completed.stderr or "<empty>"))
                         return _execution_error(
                             procedure,
                             "The NAFNet worker failed: "
                             + _process_detail(completed),
                         )
                     if not os.path.isfile(output_path):
+                        _log("_run_region: worker did not create " + output_path)
                         return _execution_error(
                             procedure,
                             "The NAFNet worker did not create its output PNG.",
@@ -1123,8 +993,10 @@ class NafnetRestore(Gimp.PlugIn):
                     # selected; the translate fixes the position
                     # (without it, the result would land at (0, 0)
                     # in the drawable, which is a bug).
+                    _log("_run_region: getting shadow buffer for paste")
                     shadow = drawable.get_shadow_buffer()
                     try:
+                        _log("_run_region: pasting result ROI")
                         paste_roi_into_shadow(
                             shadow_buffer=shadow,
                             path=output_path,
@@ -1136,18 +1008,23 @@ class NafnetRestore(Gimp.PlugIn):
                             roi_w=roi_w,
                             roi_h=roi_h,
                         )
+                        _log("_run_region: paste complete")
                     except ValueError as exc:
+                        _log("_run_region: paste ValueError: " + str(exc))
                         return _execution_error(procedure, str(exc))
 
+                _log("_run_region: merge_shadow + update + displays_flush")
                 drawable.merge_shadow(True)
-                # Update only the original selection bbox — the
+                # Update only the original selection bbox ΓÇö the
                 # GIMP display refresh is bounded to what the user
                 # actually selected. The result inside the
                 # selection is the restored RGB; pixels outside are
                 # untouched.
                 drawable.update(sel_x, sel_y, sel_w, sel_h)
                 Gimp.displays_flush()
+                _log("_run_region: paste + flush done")
             except (OSError, RuntimeError, ValueError) as exc:
+                _log("_run_region: image transfer caught exception: " + type(exc).__name__ + ": " + str(exc))
                 return _execution_error(procedure, f"NAFNet region image transfer failed: {exc}")
             except Exception as exc:
                 return _execution_error(procedure, f"NAFNet Restore Region failed: {exc}")
@@ -1160,6 +1037,4 @@ class NafnetRestore(Gimp.PlugIn):
         finally:
             if progress_started:
                 _safe_progress(Gimp.progress_end)
-
-
 Gimp.main(NafnetRestore.__gtype__, sys.argv)
