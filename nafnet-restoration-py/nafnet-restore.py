@@ -538,6 +538,8 @@ def paste_roi_into_shadow(
     context_px,
     roi_w,
     roi_h,
+    roi_x,
+    roi_y,
 ):
     """Load the worker's result PNG and paste the inner selection bbox
     into the shadow buffer at the right pixel position.
@@ -545,26 +547,30 @@ def paste_roi_into_shadow(
     The worker output is ``roi_w x roi_h`` (selection bbox + the
     64 px context ring, clipped to the image bounds). The user
     only wants the inner ``sel_w x sel_h`` (the actual selection
-    bbox, no context ring). This function:
+    bbox, no context ring). The inner selection lives at
+    absolute position ``(sel_x - roi_x, sel_y - roi_y)`` in the
+    result.png's coordinate system (e.g. (64, 64) for a
+    non-edge selection with full 64px context, (0, 0) for a
+    whole-image selection with the context fully clipped).
 
-    1. Loads the result PNG.
-    2. Crops to the inner selection bbox (offset (context_px,
-       context_px), extent (sel_w, sel_h)) via ``gegl:crop``.
-       The crop's output extent is at (context_px, context_px)
-       in the loaded image's coordinate system (per
-       ``gegl_crop_get_bounding_box`` in operations/core/crop.c).
-    3. Translates by (sel_x - context_px, sel_y - context_px)
-       so the output rectangle lands at (sel_x, sel_y) in the
-       drawable's coordinate system.
-    4. Writes to the shadow buffer; the input's extent is
-       honored so only the inner selection bbox is touched.
-       Pixels outside the selection are untouched.
+    Pipeline:
+      png-load -> gegl:crop (x = sel_x - roi_x,
+                              y = sel_y - roi_y,
+                              w = sel_w, h = sel_h)
+              -> gegl:translate (x = roi_x, y = roi_y)
+              -> gegl:write-buffer
 
-    Without the crop, the user would see a 64 px "halo" of
-    restored pixels around their selection (the context ring)
-    plus the result would be written at (0, 0) instead of
-    (sel_x, sel_y) -- a double bug. The translate fixes the
-    position; the crop drops the context ring.
+    The translate is by ``(roi_x, roi_y)`` (not by the old
+    ``(sel_x - context_px, sel_y - context_px)``) so the math
+    is exact for edge selections: for a whole-image selection
+    the result.png is ``roi_w x roi_h`` = the whole image, the
+    inner selection lives at ``(0, 0)``, the crop is at
+    ``(0, 0)`` extent the full image, the translate is by
+    ``(0, 0)``, and the write-buffer lands the result at
+    ``(0, 0)`` extent the full image. The old formula would
+    have cropped at ``(64, 64)`` -- 64 pixels outside the
+    result.png, producing undefined data in the bottom-right
+    64x64 of the destination.
 
     **Why ``gegl:crop`` (not ``gegl:rectangle``):** the
     previous version used ``gegl:rectangle`` (a render op that
@@ -574,10 +580,9 @@ def paste_roi_into_shadow(
     ``gegl:color -> gegl:crop`` chain, so the input pad is
     effectively ignored -- the result is a green rectangle of
     the requested size, regardless of the loaded PNG's
-    content. The user saw "no meaningful restoration" because
-    a green rectangle was being pasted into the selection.
-    Using ``gegl:crop`` directly fixes this: the crop's input
-    is the loaded PNG and the output is the cropped content.
+    content. Using ``gegl:crop`` directly fixes this: the
+    crop's input is the loaded PNG and the output is the
+    cropped content.
 
     **Size check fix:** the previous version raised an error
     when ``roi_w != sel_w + 2*context_px`` -- but ``roi_w`` is
@@ -600,15 +605,23 @@ def paste_roi_into_shadow(
         )
 
     crop = graph.create_child("gegl:crop")
-    crop.set_property("x", float(context_px))
-    crop.set_property("y", float(context_px))
+    # The inner selection lives at this absolute position in
+    # the result.png's coordinate system. For a whole-image
+    # selection (selection = (0, 0, w, h), roi = (0, 0, w, h))
+    # this is (0, 0) -- the crop covers the entire result.png.
+    # For a non-edge selection (selection = (sel_x, sel_y, w, h)
+    # with full 64px context on all sides) this is (64, 64).
+    crop.set_property("x", float(sel_x - roi_x))
+    crop.set_property("y", float(sel_y - roi_y))
     crop.set_property("width", float(sel_w))
     crop.set_property("height", float(sel_h))
     crop.link(loader)
 
     translate = graph.create_child("gegl:translate")
-    translate.set_property("x", float(sel_x - context_px))
-    translate.set_property("y", float(sel_y - context_px))
+    # Translate by (roi_x, roi_y) so the crop output lands at
+    # (sel_x, sel_y) in the shadow buffer.
+    translate.set_property("x", float(roi_x))
+    translate.set_property("y", float(roi_y))
     translate.link(crop)
 
     writer = graph.create_child("gegl:write-buffer")
@@ -1323,6 +1336,8 @@ class NafnetRestore(Gimp.PlugIn):
                             context_px=SELECTION_CONTEXT_PX,
                             roi_w=roi_w,
                             roi_h=roi_h,
+                            roi_x=roi_x,
+                            roi_y=roi_y,
                         )
                         _log("_run_region: paste complete")
                     except ValueError as exc:
