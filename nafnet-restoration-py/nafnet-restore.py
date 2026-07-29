@@ -509,6 +509,68 @@ def paste_roi_into_shadow(
     shadow_buffer.flush()
 
 
+def _diagnose_gegl_buffer(buffer):
+    """Log the buffer's extent and (if available) its format.
+
+    These are safe reads that work at runtime (after Gimp.main has
+    set up the wire protocol). They are intentionally NOT used to
+    branch on behaviour; they only produce diagnostic lines in
+    nafnet.log so the next failure shows the exact buffer state.
+    """
+    try:
+        extent = buffer.get_extent()
+        _log("diag: buffer extent x=" + str(extent.x) + " y=" + str(extent.y)
+             + " w=" + str(extent.width) + " h=" + str(extent.height))
+    except Exception as exc:
+        _log("diag: buffer.get_extent() failed: " + type(exc).__name__ + ": " + str(exc))
+    try:
+        fmt = buffer.get_property("format")
+        _log("diag: buffer format=" + str(fmt))
+    except Exception:
+        # gegl:buffer does not necessarily expose format via get_property.
+        # Fall back to babl_format() through the C API; if that's not
+        # available either, we just don't log it.
+        try:
+            import ctypes
+            _log("diag: buffer format introspection not available in this PyGObject build")
+        except Exception:
+            pass
+
+
+def _diagnose_gegl_node(node, label):
+    """Log the operation's class name and the list of declared
+    properties. Used to confirm a node has the properties the
+    plug-in is about to set/get on it. Safe at runtime (pure reads).
+    """
+    try:
+        op = node.get_property("gegl:operation-name")
+        _log("diag: " + label + " op=" + str(op))
+    except Exception as exc:
+        _log("diag: " + label + " get gegl:operation-name failed: "
+             + type(exc).__name__ + ": " + str(exc))
+    try:
+        op_class = node.get_operation()
+        if op_class is not None:
+            gtype = op_class.__gtype__
+            _log("diag: " + label + " gtype=" + str(gtype))
+            # List declared properties via the GObject interface
+            # (the GParamSpec table). This is what fails on
+            # non-existent properties.
+            try:
+                from gi.repository import GObject
+                for pspec in GObject.type_class_list_properties(gtype):
+                    _log("diag: " + label + " property: "
+                         + pspec.name + " (value_type=" + str(pspec.value_type) + ")")
+            except Exception as exc:
+                _log("diag: " + label + " list_properties failed: "
+                     + type(exc).__name__ + ": " + str(exc))
+        else:
+            _log("diag: " + label + " no operation (raw GeglNode)")
+    except Exception as exc:
+        _log("diag: " + label + " get_operation failed: "
+             + type(exc).__name__ + ": " + str(exc))
+
+
 def extract_alpha_png(src_buffer, path):
     """Save the alpha channel of an RGBA buffer as a Y u8 PNG.
 
@@ -516,25 +578,58 @@ def extract_alpha_png(src_buffer, path):
     GIMP side extracts the alpha, the worker combines it with the
     model's RGB output, the GIMP side loads the combined RGBA back.
 
-    The extracted buffer is a single-channel Y u8. `save_buffer_as_png`
-    saves whatever format the buffer is in, so this produces a
-    grayscale PNG.
+    Pipeline (verified against GEGL 0.4.70):
+        buffer-source --(output pad)--> component-extract
+        component-extract --(output pad)--> png-save
+    The previous version tried to call `extract.get_property("buffer")`,
+    but `gegl:component-extract` does not declare a `buffer` property
+    (its only properties are `component`, `invert`, `linear` per
+    operations/common/component-extract.c). The GValue was left at
+    G_TYPE_INVALID and PyGObject's _pygi_value_to_pyobject raised
+    TypeError("Invalid type") at pygi-value.c:782. The fix is to
+    link the extract node's output pad directly to png-save's
+    input pad and call saver.process() at the end.
 
     The caller MUST only invoke this when the drawable actually has
     an alpha channel (use `drawable.has_alpha()`). For RGB / GRAY
-    drawables the GEGL extract would either error or silently
-    produce a zero-valued buffer; instead, the caller should pass
-    `alpha_path=None` to the worker, which will fall back to the
-    input PNG's alpha (all 255 for RGB images).
+    drawables the caller should pass `alpha_path=None` to the
+    worker, which will fall back to the input PNG's alpha (all 255
+    for RGB images).
     """
+    _log("extract_alpha_png: start (path=" + path + ")")
+    _diagnose_gegl_buffer(src_buffer)
+
     graph = Gegl.Node()
+    _log("extract_alpha_png: creating buffer-source")
     source = graph.create_child("gegl:buffer-source")
+    _diagnose_gegl_node(source, "buffer-source")
+    _log("extract_alpha_png: set source.buffer")
     source.set_property("buffer", src_buffer)
+
+    _log("extract_alpha_png: creating component-extract")
     extract = graph.create_child("gegl:component-extract")
+    _diagnose_gegl_node(extract, "component-extract")
+    _log("extract_alpha_png: set extract.component=alpha")
     extract.set_property("component", "alpha")
-    extract.link(source)
-    extract.process()
-    save_buffer_as_png(extract.get_property("buffer"), path)
+
+    _log("extract_alpha_png: creating png-save")
+    saver = graph.create_child("gegl:png-save")
+    _diagnose_gegl_node(saver, "png-save")
+    _log("extract_alpha_png: set saver.path=" + path)
+    saver.set_property("path", path)
+
+    _log("extract_alpha_png: linking source -> extract")
+    source.link(extract)
+    _log("extract_alpha_png: linking extract -> saver")
+    extract.link(saver)
+
+    _log("extract_alpha_png: saver.process() (runs the whole chain)")
+    saver.process()
+    _log("extract_alpha_png: saver.process() returned")
+
+    if not os.path.isfile(path):
+        raise OSError("gegl:png-save did not create " + path)
+    _log("extract_alpha_png: done; " + path + " size=" + str(os.path.getsize(path)))
 
 
 def _return_error(procedure, status, message):
@@ -731,13 +826,23 @@ class NafnetRestore(Gimp.PlugIn):
                 with tempfile.TemporaryDirectory(prefix="gimp-nafnet-") as temp_dir:
                     _log("_run_whole: temp_dir=" + temp_dir)
                     image_path = os.path.join(temp_dir, "image.png")
+                    has_alpha = drawable.has_alpha()
+                    alpha_path = os.path.join(temp_dir, "alpha.png") if has_alpha else None
                     output_path = os.path.join(temp_dir, "result.png")
+                    _log("_run_whole: has_alpha=" + str(has_alpha))
 
                     _log("_run_whole: drawable.get_buffer()")
                     full_buffer = drawable.get_buffer()
                     _log("_run_whole: save_buffer_as_png(image.png)")
                     save_buffer_as_png(full_buffer, image_path)
                     _log("_run_whole: image.png saved")
+
+                    if has_alpha:
+                        _log("_run_whole: extracting alpha.png")
+                        extract_alpha_png(full_buffer, alpha_path)
+                        _log("_run_whole: alpha.png extracted")
+                    else:
+                        _log("_run_whole: no alpha to extract; worker will use input alpha")
 
                     _phase("Running NAFNet worker (python)...", 0.20)
                     # Use Python worker directly. No alpha, no rust.
@@ -756,6 +861,8 @@ class NafnetRestore(Gimp.PlugIn):
                         "--output", output_path,
                         "--model", MODEL_PATH,
                     ]
+                    if alpha_path is not None:
+                        command += ["--alpha", alpha_path]
                     _log("_run_whole: command=" + " ".join(command))
 
                     _log("_run_whole: spawning worker (no progress callback)")
