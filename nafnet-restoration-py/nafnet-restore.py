@@ -1141,6 +1141,14 @@ class NafnetRestore(Gimp.PlugIn):
                     Gimp.PDBStatusType.SUCCESS, GLib.Error(),
                 )
 
+            # Now that we know there's a selection, get its
+            # bounds. mask_intersect returns
+            # (intersects, x, y, width, height) clipped to the
+            # drawable -- the same values the rest of the
+            # pipeline needs (sel_x, sel_y, sel_w, sel_h).
+            intersects, sel_x, sel_y, sel_w, sel_h = drawable.mask_intersect()
+            _log("_run_region: mask_intersect=" + repr((intersects, sel_x, sel_y, sel_w, sel_h)))
+
             width = drawable.get_width()
             height = drawable.get_height()
             _log("_run_region: drawable size=" + str(width) + "x" + str(height))
