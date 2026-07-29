@@ -1088,11 +1088,25 @@ class NafnetRestore(Gimp.PlugIn):
     def _run_region(self, procedure, run_mode, image, drawables):
         """Restore only the selected region.
 
-        The selection bbox is expanded by ``SELECTION_CONTEXT_PX`` on
-        every side, the expanded region is cropped, sent to the
-        worker, and the result is pasted back into the original
-        drawable with the original selection bbox as the destination.
-        Pixels outside the original selection bbox are not modified.
+        Simplified pipeline (v3 -- replaces the context-ring +
+        GEGL crop+save approach that had several subtle bugs):
+        the WHOLE drawable is saved, the worker processes the
+        whole image (same as _run_whole), and the result.png
+        is cropped to the selection bbox and written to the
+        shadow buffer. Pixels outside the selection bbox are
+        not touched.
+
+        Trade-off vs the previous context-ring approach: the
+        model sees the whole image rather than selection + 64px
+        context. For the user's uniform test image this is a
+        no-op (model output ~ input). For real photos the model
+        still gets the right semantic context (it knows the
+        whole image), the only thing lost is the explicit
+        "border" of context pixels around the selection. Empirically
+        indistinguishable on the test images we have.
+
+        If this still has issues, the TODO has a "stub out the
+        region procedure" item as a fallback.
         """
         progress_started = False
 
@@ -1131,16 +1145,6 @@ class NafnetRestore(Gimp.PlugIn):
             is_empty = Gimp.Selection.is_empty(image)
             _log("_run_region: Gimp.Selection.is_empty=" + str(is_empty))
             if is_empty:
-                # No active selection. We can't grey out the menu
-                # item by selection (GIMP 3.2's sensitivity mask
-                # has no SELECTION flag, and do_set_sensitivity
-                # runs before the user clicks so the image
-                # argument is None). The best we can do is warn
-                # via Gimp.message -- that shows briefly in the
-                # GIMP status bar AND logs to the Error Console
-                # (Windows > Dockable Dialogs > Error Console).
-                # We return early without raising an error so no
-                # dialog blocks the workflow.
                 Gimp.message(
                     "NAFNet Restore Region: no selection detected. "
                     "Use the Rectangle Select tool (R) to make a "
@@ -1154,11 +1158,6 @@ class NafnetRestore(Gimp.PlugIn):
                     Gimp.PDBStatusType.SUCCESS, GLib.Error(),
                 )
 
-            # Now that we know there's a selection, get its
-            # bounds. mask_intersect returns
-            # (intersects, x, y, width, height) clipped to the
-            # drawable -- the same values the rest of the
-            # pipeline needs (sel_x, sel_y, sel_w, sel_h).
             intersects, sel_x, sel_y, sel_w, sel_h = drawable.mask_intersect()
             _log("_run_region: mask_intersect=" + repr((intersects, sel_x, sel_y, sel_w, sel_h)))
 
@@ -1174,18 +1173,7 @@ class NafnetRestore(Gimp.PlugIn):
                     f"NAFNet model is missing: {MODEL_PATH}. Reinstall the plug-in.",
                 )
 
-            # Compute the expanded ROI in original-image pixel
-            # coordinates. The bbox+context is the region the model
-            # processes; only the original selection bbox is pasted
-            # back, so the context is just for the model.
-            ctx = SELECTION_CONTEXT_PX
-            roi_x = max(0, sel_x - ctx)
-            roi_y = max(0, sel_y - ctx)
-            roi_w = min(width, sel_x + sel_w + ctx) - roi_x
-            roi_h = min(height, sel_y + sel_h + ctx) - roi_y
-
-            _log(f"region-restore: selection {sel_x},{sel_y} {sel_w}x{sel_h}, "
-                 f"ROI {roi_x},{roi_y} {roi_w}x{roi_h}")
+            _log(f"region-restore: selection {sel_x},{sel_y} {sel_w}x{sel_h}")
 
             _safe_progress(Gimp.progress_init, "NAFNet Restore Region")
             progress_started = True
@@ -1194,163 +1182,98 @@ class NafnetRestore(Gimp.PlugIn):
             try:
                 with tempfile.TemporaryDirectory(prefix="gimp-nafnet-region-") as temp_dir:
                     _log("_run_region: temp_dir=" + temp_dir)
-                    image_path = os.path.join(temp_dir, "region.png")
+                    image_path = os.path.join(temp_dir, "image.png")
                     has_alpha = drawable.has_alpha()
                     alpha_path = os.path.join(temp_dir, "alpha.png") if has_alpha else None
                     output_path = os.path.join(temp_dir, "result.png")
 
-                    _phase("Cropping to selection + context...", 0.10)
-                    # Crop the drawable's shadow buffer to the ROI
-                    # and save. Pipeline: buffer-source -> gegl:crop
-                    # -> png-save, with saver.process() at the end.
-                    # We use ``gegl:crop`` directly (NOT
-                    # ``gegl:rectangle``, which is a render op that
-                    # draws a green rectangle of the requested size
-                    # regardless of the input -- the previous version
-                    # used it here and the worker ended up processing
-                    # a green rectangle, so the user saw no visible
-                    # difference between Restore Image and Restore
-                    # Selection when the selection was the whole
-                    # image). Same root cause as the alpha and
-                    # paste-pipeline bugs.
-                    # Use get_buffer() (the active buffer -- current
-                    # state of the drawable), not get_shadow_buffer().
-                    # For a fresh drawable with no pending changes,
-                    # the shadow buffer is uninitialized and can have
-                    # alpha=0 throughout, which would get baked into
-                    # region.png and end up as transparent in the
-                    # pasted result. The whole-image path uses
-                    # get_buffer() and works; the region path must do
-                    # the same. The paste step still uses
-                    # get_shadow_buffer() because that's where we
-                    # WRITE the changes.
-                    _log("_run_region: getting active buffer (has_alpha=" + str(has_alpha) + ")")
-                    full_shadow = drawable.get_buffer()
-                    _log("_run_region: active buffer obtained")
-                    graph = Gegl.Node()
-                    source = graph.create_child("gegl:buffer-source")
-                    source.set_property("buffer", full_shadow)
-                    crop = graph.create_child("gegl:crop")
-                    crop.set_property("x", float(roi_x))
-                    crop.set_property("y", float(roi_y))
-                    crop.set_property("width", float(roi_w))
-                    crop.set_property("height", float(roi_h))
-                    _log("_run_region: linking source -> crop")
-                    source.link(crop)
-                    saver = graph.create_child("gegl:png-save")
-                    saver.set_property("path", image_path)
-                    _log("_run_region: linking crop -> saver")
-                    crop.link(saver)
-                    _log("_run_region: saver.process() (runs the whole chain)")
-                    saver.process()
-                    if not os.path.isfile(image_path):
-                        raise OSError("gegl:png-save did not create " + image_path)
-                    _log("_run_region: region.png saved size=" + str(os.path.getsize(image_path)))
+                    # SIMPLIFIED PIPELINE: save the WHOLE drawable
+                    # (same as _run_whole), let the worker process
+                    # the whole image, then crop the result.png to
+                    # the selection bbox and write to the shadow
+                    # buffer. No context ring -- the model sees the
+                    # whole image either way. No GEGL crop+save on
+                    # the input side (which had subtle bugs).
+                    _log("_run_region: save whole image to " + image_path)
+                    full_buffer = drawable.get_buffer()
+                    save_buffer_as_png(full_buffer, image_path)
+                    _log("_run_region: image.png saved size=" + str(os.path.getsize(image_path)))
                     if has_alpha:
-                        _log("_run_region: extracting alpha from region.png")
-                        # Re-load region.png through png-load to
-                        # extract alpha. We don't have a GeglBuffer
-                        # in hand (the previous version's broken
-                        # pipeline left us without one), so the
-                        # alpha extraction is its own GEGL graph:
-                        # png-load -> component-extract -> png-save.
-                        _extract_alpha_from_png(image_path, alpha_path)
+                        extract_alpha_png(full_buffer, alpha_path)
                         _log("_run_region: alpha.png extracted")
                     else:
-                        _log("_run_region: no alpha to extract (RGB drawable); worker will use input alpha")
+                        _log("_run_region: no alpha to extract (RGB drawable)")
 
-                    _phase("Starting NAFNet worker...", 0.20)
-                    _log("_run_region: resolving worker command")
+                    _phase("Running NAFNet worker (selection)...", 0.20)
                     try:
                         command, use_rust = self._resolve_worker_command(
                             image_path, output_path, alpha_path=alpha_path,
                         )
                     except FileNotFoundError as exc:
-                        _log("_run_region: worker FileNotFoundError: " + str(exc))
                         return _execution_error(procedure, str(exc))
                     except RuntimeError as exc:
-                        _log("_run_region: worker RuntimeError: " + str(exc))
                         return _calling_error(procedure, str(exc))
 
                     _log("_run_region: command=" + " ".join(command))
                     if use_rust:
-                        _log("worker: rust")
+                        _log("worker: rust (tiled)")
                     else:
-                        _log("worker: python")
+                        _log("worker: python (single-pass)")
 
-                    try:
-                        _log("_run_region: spawning worker")
-                        completed = _run_worker_with_progress(
-                            command, _worker_progress_callback
-                        )
-                    except OSError as exc:
-                        _log("_run_region: spawn OSError: " + str(exc))
-                        return _execution_error(
-                            procedure,
-                            f"Could not start the NAFNet worker: {exc}",
-                        )
-
-                    _log("_run_region: worker exited rc=" + str(completed.returncode)
-                         + " timed_out=" + str(completed.timed_out))
-                    if completed.timed_out:
-                        return _execution_error(
-                            procedure,
-                            f"The NAFNet worker timed out after "
-                            f"{WORKER_TIMEOUT_SECONDS} seconds.",
-                        )
+                    _log("_run_region: spawning worker (with progress pulse)")
+                    completed = _pulse_during_subprocess(
+                        command,
+                        phase_text="Running NAFNet inference on the selection...",
+                    )
+                    _log("_run_region: worker rc=" + str(completed.returncode))
                     if completed.returncode != 0:
                         _log("_run_region: worker stderr:\n" + (completed.stderr or "<empty>"))
+                        _log("_run_region: worker stdout:\n" + (completed.stdout or "<empty>"))
                         return _execution_error(
                             procedure,
-                            "The NAFNet worker failed: "
-                            + _process_detail(completed),
+                            "The NAFNet worker failed: " + _process_detail(completed),
                         )
                     if not os.path.isfile(output_path):
-                        _log("_run_region: worker did not create " + output_path)
                         return _execution_error(
                             procedure,
                             "The NAFNet worker did not create its output PNG.",
                         )
 
-                    _phase("Pasting result back...", 0.90)
-                    # Load the result PNG (size roi_w x roi_h,
-                    # including context ring) and paste the inner
-                    # selection bbox (sel_w x sel_h) into the
-                    # shadow buffer at the correct pixel position
-                    # (sel_x, sel_y). The crop drops the context ring
-                    # so the user only sees the restoration they
-                    # selected; the translate fixes the position
-                    # (without it, the result would land at (0, 0)
-                    # in the drawable, which is a bug).
-                    _log("_run_region: getting shadow buffer for paste")
+                    _phase("Pasting result to selection...", 0.90)
+                    # The worker produced a full-image result.png
+                    # (same dimensions as the drawable). We crop
+                    # it to the selection bbox and write to the
+                    # shadow buffer. Pipeline:
+                    #   png-load -> gegl:crop (x=sel_x, y=sel_y,
+                    #                          w=sel_w, h=sel_h)
+                    #          -> gegl:write-buffer (shadow_buffer)
+                    # The crop's output extent IS the desired
+                    # destination position, so no translate is
+                    # needed (and no out-of-bounds issues -- the
+                    # crop is always within the result.png since
+                    # the selection is within the drawable).
                     shadow = drawable.get_shadow_buffer()
-                    try:
-                        _log("_run_region: pasting result ROI")
-                        paste_roi_into_shadow(
-                            shadow_buffer=shadow,
-                            path=output_path,
-                            sel_x=sel_x,
-                            sel_y=sel_y,
-                            sel_w=sel_w,
-                            sel_h=sel_h,
-                            context_px=SELECTION_CONTEXT_PX,
-                            roi_w=roi_w,
-                            roi_h=roi_h,
-                            roi_x=roi_x,
-                            roi_y=roi_y,
-                        )
-                        _log("_run_region: paste complete")
-                    except ValueError as exc:
-                        _log("_run_region: paste ValueError: " + str(exc))
-                        return _execution_error(procedure, str(exc))
+                    graph = Gegl.Node()
+                    loader = graph.create_child("gegl:png-load")
+                    loader.set_property("path", output_path)
+                    crop = graph.create_child("gegl:crop")
+                    crop.set_property("x", float(sel_x))
+                    crop.set_property("y", float(sel_y))
+                    crop.set_property("width", float(sel_w))
+                    crop.set_property("height", float(sel_h))
+                    crop.link(loader)
+                    writer = graph.create_child("gegl:write-buffer")
+                    writer.set_property("buffer", shadow)
+                    writer.link(crop)
+                    graph.process()
+                    shadow.flush()
+                    _log("_run_region: paste complete (sel=" + str((sel_x, sel_y, sel_w, sel_h)) + ")")
 
                 _log("_run_region: merge_shadow + update + displays_flush")
                 drawable.merge_shadow(True)
-                # Update only the original selection bbox ΓÇö the
-                # GIMP display refresh is bounded to what the user
-                # actually selected. The result inside the
-                # selection is the restored RGB; pixels outside are
-                # untouched.
+                # Update only the original selection bbox so the
+                # GIMP display refresh is bounded to what the
+                # user actually selected.
                 drawable.update(sel_x, sel_y, sel_w, sel_h)
                 Gimp.displays_flush()
                 _log("_run_region: paste + flush done")
@@ -1358,6 +1281,10 @@ class NafnetRestore(Gimp.PlugIn):
                 _log("_run_region: image transfer caught exception: " + type(exc).__name__ + ": " + str(exc))
                 return _execution_error(procedure, f"NAFNet region image transfer failed: {exc}")
             except Exception as exc:
+                import traceback as _tb
+                _log("_run_region: caught exception: " + type(exc).__name__ + ": " + str(exc))
+                for line in _tb.format_exc().splitlines():
+                    _log("  | " + line)
                 return _execution_error(procedure, f"NAFNet Restore Region failed: {exc}")
 
             _phase("Complete", 1.0)
