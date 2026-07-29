@@ -814,49 +814,6 @@ class NafnetRestore(Gimp.PlugIn):
             "plug-in-nafnet-restore-region",
         ]
 
-    def do_set_sensitivity(self, sensitivity_mask):
-        """Grey out ``plug-in-nafnet-restore-region`` when the
-        active image has no non-empty selection.
-
-        GIMP's built-in ``GimpProcedureSensitivityMask`` flags
-        are drawable-based only (DRAWABLE / DRAWABLES /
-        NO_DRAWABLES / NO_IMAGE / ALWAYS). There is no
-        SELECTION mask in the API. To grey out by selection
-        we override this virtual method, which GIMP calls when
-        it needs to know whether the menu item should be
-        sensitive.
-
-        ``self`` is the GimpProcedure instance. For
-        image-scoped procedures the current image is the
-        first argument of the procedure; we pull it via
-        ``get_arguments()``. ``Gimp.Selection.bounds()``
-        returns ``(non_empty, x1, y1, x2, y2)`` where
-        ``non_empty`` is False for "select none".
-
-        Any exception (e.g. no image, malformed args) is
-        swallowed and the procedure is left sensitive. The
-        plug-in's own error path returns a friendly
-        "Make a non-empty selection first." error in
-        ``_run_region`` when the user clicks an unsensitive
-        item via the keyboard, so the worst case is a
-        non-actionable menu item, never a crash.
-        """
-        try:
-            if self.get_name() != "plug-in-nafnet-restore-region":
-                return True
-            args = self.get_arguments()
-            if not args:
-                return True
-            image = args[0]
-            if image is None:
-                return True
-            non_empty, _, _, _, _ = image.get_selection().bounds()
-            return bool(non_empty)
-        except Exception as exc:
-            _log("do_set_sensitivity: " + type(exc).__name__ + ": " + str(exc)
-                 + " (defaulting to sensitive)")
-            return True
-
     def _create_procedure(self, name, menu_label, blurb):
         Gegl.init(None)
         procedure = Gimp.ImageProcedure.new(
@@ -1156,9 +1113,27 @@ class NafnetRestore(Gimp.PlugIn):
             intersects, sel_x, sel_y, sel_w, sel_h = drawable.mask_intersect()
             _log("_run_region: mask_intersect=" + repr((intersects, sel_x, sel_y, sel_w, sel_h)))
             if not intersects:
-                return _calling_error(
-                    procedure,
-                    "Make a non-empty selection on the active drawable first.",
+                # No active selection. We can't grey out the menu
+                # item by selection (GIMP 3.2's sensitivity mask
+                # has no SELECTION flag, and do_set_sensitivity
+                # runs before the user clicks so the image
+                # argument is None). The best we can do is warn
+                # via Gimp.message -- that shows briefly in the
+                # GIMP status bar AND logs to the Error Console
+                # (Windows > Dockable Dialogs > Error Console).
+                # We return early without raising an error so no
+                # dialog blocks the workflow.
+                Gimp.message(
+                    "NAFNet Restore Region: no selection detected. "
+                    "Use the Rectangle Select tool (R) to make a "
+                    "non-empty selection, then try again. "
+                    "(GIMP 3.2 has no API to grey out menu items "
+                    "based on selection state; this warning is "
+                    "logged to the Error Console.)"
+                )
+                _log("_run_region: no selection; Gimp.message warning emitted; returning early")
+                return procedure.new_return_values(
+                    Gimp.PDBStatusType.SUCCESS, GLib.Error(),
                 )
 
             width = drawable.get_width()
