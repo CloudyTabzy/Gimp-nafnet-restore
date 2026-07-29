@@ -96,8 +96,13 @@ import time as _t_for_stderr
 
 def _stderr(msg):
     ts = _t_for_stderr.strftime("%H:%M:%S")
-    _sys_for_stderr.write(f"[nafnet {ts}] {msg}\n")
-    _sys_for_stderr.flush()
+    # Use the stderr FileObject directly. The ``sys`` module
+    # itself doesn't have a ``.write`` method — only the ``sys.stderr``
+    # and ``sys.stdout`` FileObjects do. ``flush=True`` is required
+    # because GIMP may kill the plug-in child before its buffers
+    # are flushed, in which case the diagnostic output is lost.
+    _sys_for_stderr.stderr.write(f"[nafnet {ts}] {msg}\n")
+    _sys_for_stderr.stderr.flush()
 
 
 # Module-load marker. If the user launches GIMP from a terminal
