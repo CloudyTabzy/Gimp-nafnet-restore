@@ -3,35 +3,70 @@
 
 Exposes two image-scoped procedures that share this single shebang alias:
 
-- ``plug-in-nafnet-restore`` ΓÇö restore the entire active drawable.
-- ``plug-in-nafnet-restore-region`` ΓÇö restore only the selected
-  region (uses the selection bbox with a small context padding so
+- ``plug-in-nafnet-restore`` -- restore the entire active drawable.
+- ``plug-in-nafnet-restore-region`` -- restore only the selected
+  region (uses the selection bbox with a 64 px context padding so
   the model has surrounding pixels to inform the restoration).
 
-Both spawn a sidecar worker (Rust by default, Python fallback) that
-runs NAFNet-REDS on the RGB channels and writes a PNG; the plug-in
-loads the PNG back into the drawable's shadow buffer and merges.
+Both procedures spawn a sidecar worker (Rust by default, Python
+fallback) that runs NAFNet-REDS on the RGB channels and writes a
+PNG; the plug-in loads the PNG back into the drawable's shadow
+buffer and merges. For RGBA drawables, the original alpha is
+extracted to a separate Y u8 PNG, passed to the worker via
+``--alpha``, and recombined with the model's RGB output so the
+alpha is preserved byte-for-byte through the sidecar round-trip.
 
 Architecture mirrors the LaMa plug-in:
 
-  GIMP process  (MINGW Python 3.14, gi + GEGL only)
-    ΓööΓöÇ #!nafnet-gimp-python  (shebang ΓåÆ user-level .interp mapping)
-         ΓööΓöÇ nafnet-restore.py
-              Γö£ΓöÇ exports drawable (+ optional selection mask) to temp PNGs
-              Γö£ΓöÇ spawns nafnet_worker_rust.exe (default) or nafnet_worker.py
-              ΓööΓöÇ loads result PNG into drawable shadow buffer, merge_shadow
-                        Γöé
-                        Γû╝
-             worker process  (Rust or Python, with Pillow + onnxruntime)
-                 ort CPU provider
-                 ?? model pipeline: load PNG -> HWC f32 [0, 1] -> (Rust:
-                    tile + blend overlap) -> NAFNet -> HWC f32 -> save PNG
+    GIMP process  (MINGW Python 3.14, gi + GEGL only)
+    |
+    +-- #!nafnet-gimp-python  (shebang -> user-level .interp mapping)
+    |   |
+    |   +-- nafnet-restore.py
+    |        |
+    |        +-- exports drawable to temp PNG (whole) or crops to
+    |        |   selection ROI + 64 px context (region)
+    |        +-- if RGBA: extracts alpha to alpha.png via
+    |        |   buffer-source -> component-extract -> png-save
+    |        +-- spawns worker subprocess
+    |        |   (Rust default --features = ["cpu"], Python fallback)
+    |        +-- loads result PNG into drawable shadow buffer
+    |        +-- merge_shadow
+    |
+    +-- worker process  (Rust or Python, with Pillow + onnxruntime)
+        ort CPU provider
+        model pipeline: load PNG -> HWC f32 [0, 1] -> (Rust:
+           512x512 tile + 2D tent-blend overlap; Python:
+           single forward) -> NAFNet -> HWC f32 -> save PNG
+        if --alpha given: read Y u8 alpha.png, combine with
+           RGB output, save RGBA
 
-NAFNet is 1:1 spatial (input H,W == output H,W) and 3-channel RGB
-(red, green, blue only). Alpha is dropped on the way in and not
-restored; if the user wants alpha preservation, the GIMP-side
-plug-in can copy it back from the original drawable after applying
-the restoration. (TBD: not implemented in v1.)
+NAFNet is 1:1 spatial (input H,W == output H,W) and 3-channel
+RGB. RGBA inputs are split: the GIMP-side extracts the alpha
+into a separate Y u8 PNG via GEGL's ``component-extract
+component=alpha`` operation, the worker combines it with the
+model's RGB output, and the result loads back as RGBA. The
+alpha bytes are preserved byte-for-byte through the sidecar.
+
+Diagnostics: every GEGL call and every worker subprocess is
+bracketed by ``_log()`` lines in ``nafnet.log`` (in this
+directory). On any failure the log pinpoints the exact step.
+The file-based log is safe at both module load and runtime
+(see Pitfall 16 in GIMP-plugin-common-pitfalls.md).
+
+Worker selection: ``nafnet_config.json`` in this directory has a
+``worker_kind`` field. ``"rust"`` (default when the binary is
+present) uses 512x512 tiled inference + 2D tent-blend overlap
+and handles any image size. ``"python"`` is the fallback
+(single-pass; OOMs above ~1 Mpix). The Python worker is
+selected automatically if no Rust binary is found.
+
+Progress: while the worker is running, a daemon thread calls
+``Gimp.progress_pulse()`` every 250 ms so the GIMP progress
+bar shows activity. The phase text is "Running NAFNet
+inference (~30 s for 2K images)..." for whole-image mode and
+"Running NAFNet inference on the selection... please wait"
+for region mode.
 """
 
 from __future__ import annotations
@@ -762,7 +797,16 @@ class NafnetRestore(Gimp.PlugIn):
                 "drawable. ~9 s per 1024x1024 tile. Best for general "
                 "deblurring and restoration of natural photographs.",
             )
-        # Region mode is stubbed for now — see NOTES.md.
+        if name == "plug-in-nafnet-restore-region":
+            return self._create_procedure(
+                name,
+                "_Restore Selection (NAFNet)...",
+                "Run NAFNet image restoration only inside the active "
+                "selection. A " + str(SELECTION_CONTEXT_PX) + " px context "
+                "ring is added around the selection bbox so the model "
+                "has surrounding pixels to inform the restoration. "
+                "Pixels outside the original selection are not modified.",
+            )
         return None
 
     def run(self, procedure, run_mode, image, drawables, config, run_data):
