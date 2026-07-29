@@ -1175,6 +1175,20 @@ class NafnetRestore(Gimp.PlugIn):
 
             _log(f"region-restore: selection {sel_x},{sel_y} {sel_w}x{sel_h}")
 
+            # If the selection is the whole image, delegate to
+            # _run_whole for guaranteed-identical behavior to the
+            # Restore Image filter. This avoids any GEGL pipeline
+            # subtlety (crop+write of the whole buffer, etc.) and
+            # makes "select all + Restore Selection" byte-identical
+            # to "Restore Image" -- which the user can verify.
+            # For sub-selections we use the simplified pipeline
+            # below (process whole image, crop result to selection).
+            if sel_x == 0 and sel_y == 0 and sel_w == width and sel_h == height:
+                _log("_run_region: selection is the whole image; "
+                     "delegating to _run_whole for guaranteed-identical "
+                     "behavior to the Restore Image filter")
+                return self._run_whole(procedure, run_mode, image, drawables)
+
             _safe_progress(Gimp.progress_init, "NAFNet Restore Region")
             progress_started = True
             _phase("Preparing selection...", 0.05)
