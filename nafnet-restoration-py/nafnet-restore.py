@@ -1110,9 +1110,14 @@ class NafnetRestore(Gimp.PlugIn):
 
             drawable = drawables[0]
             _log("_run_region: drawable type=" + str(type(drawable).__name__))
-            intersects, sel_x, sel_y, sel_w, sel_h = drawable.mask_intersect()
-            _log("_run_region: mask_intersect=" + repr((intersects, sel_x, sel_y, sel_w, sel_h)))
-            if not intersects:
+            # Detect "no active selection" with Selection.is_empty
+            # -- mask_intersect cannot do this, it always returns
+            # True with the full drawable bounds when there's no
+            # selection (which would silently let a no-selection
+            # click fall through and process the entire image).
+            is_empty = Gimp.Selection.is_empty(image)
+            _log("_run_region: Gimp.Selection.is_empty=" + str(is_empty))
+            if is_empty:
                 # No active selection. We can't grey out the menu
                 # item by selection (GIMP 3.2's sensitivity mask
                 # has no SELECTION flag, and do_set_sensitivity
