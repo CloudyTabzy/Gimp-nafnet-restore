@@ -3,28 +3,131 @@
 Pending work tracked across the project. Format: `- [ ] <item>`
 plus the file/place where it belongs.
 
+## Current state (2026-08)
+
+The whole-image procedure works end-to-end: a 424×640 RGB layer
+restores in ~4 s (1 s save, 3 s Python-worker inference, <50 ms
+load + merge). The region procedure and alpha-channel preservation
+are stubbed and will be rebuilt incrementally — see below.
+
+Verified live by running
+`Filters > Enhance > Restore Image (NAFNet)...` on a 424×640
+RGB Layer. The log shows the complete pipeline:
+`get_buffer → save_buffer_as_png → worker spawn → rc=0 → load_png_into_shadow → merge_shadow → flush`.
+
+Committed as `3c1574b` (Stub region procedure + simplify
+_run_whole: drop alpha, drop Rust).
+
+## Incremental build-up (in order)
+
+- [ ] **Re-add alpha preservation** for RGBA drawables. The
+      plug-in currently ignores `drawable.has_alpha()` and the
+      worker is invoked without `--alpha`, so an RGBA drawable
+      ends up with the model's RGB output and a fresh opaque
+      alpha. For RGBA inputs we want the original alpha
+      preserved byte-for-byte (the previous version did this;
+      tests in `tests/test_pipeline.py` covered it).
+
+      **Root cause of the previous failure** (researched
+      2026-08, see `Docs/NOTES.md` for the full write-up):
+
+      1. The OLD `extract_alpha_png` had three bugs in how it
+         composed the GEGL graph:
+         - `extract.link(source)` was the wrong direction
+           (GeglNode links go from the source's output pad to
+           the sink's input pad, so it should have been
+           `source.link(extract)`).
+         - `extract.process()` was called on an intermediate
+           node. Only the LAST node in the chain (the sink)
+           should be processed.
+         - `extract.get_property("buffer")` was the actual
+         trigger of "Invalid type". `gegl:component-extract`
+         has properties `component`, `invert`, `linear` — no
+         `buffer`. `gegl_node_get_property` then leaves the
+         GValue at `G_TYPE_INVALID` and PyGObject's
+         `_pygi_value_to_pyobject` raises
+         `TypeError("Invalid type")` (see
+         `pygobject-master/gi/pygi-value.c:782`).
+
+      2. The correct pipeline for "extract alpha and save to
+         PNG" is:
+         ```
+         buffer-source (input=src_buffer)
+              ↓
+         component-extract (component=alpha)
+              ↓
+         png-save (path=alpha_path)
+         ```
+         with `saver.process()` at the end. No
+         `get_property("buffer")` needed.
+
+      **Diagnostic log lines to add** (safe at runtime, file-based):
+      - Right before each `set_property` call, log the property
+        name and value type.
+      - Right before the `saver.process()` call, log the
+        connected graph: list of pads (in → out).
+      - On exception, log the exception class, message, AND the
+        full GEGL node's class name (so we know which node in
+        the chain threw).
+
+      **Files to change**:
+      - `nafnet-restoration-py/nafnet-restore.py::extract_alpha_png`
+        — rewrite with the correct GEGL pipeline
+      - `nafnet-restoration-py/nafnet-restore.py::_run_whole` —
+        call `extract_alpha_png(buffer, alpha_path)` when
+        `has_alpha=True`, pass `alpha_path=alpha_path` to the
+        worker when set
+      - Worker Python path already handles `--alpha` correctly
+        (see `nafnet_worker.py:98-114`); the fallback to
+        `original_alpha` when shape mismatches is what we want
+        for RGB inputs anyway
+
+- [ ] **Re-add region procedure** once alpha works. The
+      `_run_region` function is still in the source, just not
+      registered. Re-add the menu entry in `do_create_procedure`
+      and the menu item comes back. The `paste_roi_into_shadow`
+      helper is also still there (verified by inspection). The
+      diagnostic logging pattern from #1 (above) is reusable.
+
+- [ ] **Re-add Rust worker** as the default. Currently
+      `_run_whole` hard-codes Python. Move the choice back to
+      `_resolve_worker_command` (which already exists and works)
+      once we're confident both paths succeed. Rust cold-start is
+      ~3× faster for the Python cold start of ORT/Pillow
+      imports.
+
+- [ ] **Re-add the progress callback** (`_run_worker_with_progress`)
+      so the GIMP progress bar pulses during the 3s+ inference.
+      We had it before, just stripped for diagnostics.
+
+- [ ] **Add tiling** in the Python worker for high-res images.
+      The Rust worker already has 512×512 tiles + 2D tent blend.
+      Python can mirror that, or we can document "use the Rust
+      worker for >1 Mpix images" and leave Python single-pass.
+
+- [ ] **Update the docstring** in the source file to reflect the
+      current state (the architecture diagram still mentions
+      region-mode and Rust as the default; both are now stubs).
+
 ## Worker hardening (next session)
 
-- [x] **Alpha-channel preservation in region mode** — done. The
-      GIMP-side glue extracts the original alpha to a separate Y u8
-      PNG, the worker combines it with the model output to produce
-      RGBA, and the GIMP-side writes the combined RGBA back to the
-      shadow buffer. Both workers (Python and Rust) accept an
-      `--alpha` argument. Tests in `tests/test_pipeline.py`
-      (`TestPythonWorkerWholeImage::test_alpha_preservation`,
-      `TestRustWorkerWholeImage::test_alpha_preservation`) verify
-      the alpha is preserved byte-for-byte through the sidecar
-      round-trip.
+- [x] **Alpha-channel preservation in region mode** — STUBBED
+      2026-08. Was done in an earlier session but the GEGL
+      pipeline had bugs that surfaced as "Invalid type" — see
+      "Re-add alpha preservation" above for the rebuild plan.
+      The previous test
+      `TestPythonWorkerWholeImage::test_alpha_preservation` and
+      `TestRustWorkerWholeImage::test_alpha_preservation`
+      are still in `tests/test_pipeline.py` and will pass once
+      the new GEGL pipeline is in place.
 
 - [x] **Crop the result PNG to the original selection bbox before
-      pasting** — done. The GIMP-side glue now uses a GEGL graph
-      with `gegl:rectangle` (crop to inner selection bbox) +
-      `gegl:translate` (move to (sel_x, sel_y)) + `gegl:write-buffer`
-      (paste at translated position). The context ring is no longer
-      visible to the user and the result lands at the right
-      pixel position. Helper: `paste_roi_into_shadow` in
-      `nafnet-restore.py`. Fixed the position bug (the result was
-      previously written at (0, 0) instead of (sel_x, sel_y)).
+      pasting** — kept from earlier session. The GIMP-side glue
+      uses a GEGL graph with `gegl:rectangle` (crop to inner
+      selection bbox) + `gegl:translate` (move to (sel_x, sel_y))
+      + `gegl:write-buffer` (paste at translated position). The
+      `paste_roi_into_shadow` helper is still in the source; will
+      be re-used when region mode comes back.
 
 - [ ] **Headless GIMP CI** — none of the tests run automatically
       inside GIMP. Add a smoke test that launches GIMP with a
