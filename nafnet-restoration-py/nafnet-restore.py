@@ -542,41 +542,64 @@ def paste_roi_into_shadow(
     """Load the worker's result PNG and paste the inner selection bbox
     into the shadow buffer at the right pixel position.
 
-    The worker output is `roi_w x roi_h` (selection bbox + context
-    ring). The user only wants the inner `sel_w x sel_h` (the actual
-    selection bbox, no context ring). This function:
+    The worker output is ``roi_w x roi_h`` (selection bbox + the
+    64 px context ring, clipped to the image bounds). The user
+    only wants the inner ``sel_w x sel_h`` (the actual selection
+    bbox, no context ring). This function:
 
-    1. Loads the result PNG (default origin 0, 0).
+    1. Loads the result PNG.
     2. Crops to the inner selection bbox (offset (context_px,
-       context_px), extent (sel_w, sel_h)). The crop's output
-       rectangle is at (context_px, context_px) in the input's
-       coordinate system.
-    3. Translates by (sel_x - context_px, sel_y - context_px) so
-       the output rectangle lands at (sel_x, sel_y) in the
+       context_px), extent (sel_w, sel_h)) via ``gegl:crop``.
+       The crop's output extent is at (context_px, context_px)
+       in the loaded image's coordinate system (per
+       ``gegl_crop_get_bounding_box`` in operations/core/crop.c).
+    3. Translates by (sel_x - context_px, sel_y - context_px)
+       so the output rectangle lands at (sel_x, sel_y) in the
        drawable's coordinate system.
-    4. Writes to the shadow buffer at origin (sel_x, sel_y) ΓÇö
-       only the inner selection bbox is touched, the rest of the
-       shadow buffer is untouched.
+    4. Writes to the shadow buffer; the input's extent is
+       honored so only the inner selection bbox is touched.
+       Pixels outside the selection are untouched.
 
-    Without the crop, the user would see a 64 px "halo" of restored
-    pixels around their selection (the context ring) plus the
-    result would be written at (0, 0) instead of (sel_x, sel_y) ΓÇö a
-    double bug. The translate fixes the position; the rectangle
-    drops the context ring.
+    Without the crop, the user would see a 64 px "halo" of
+    restored pixels around their selection (the context ring)
+    plus the result would be written at (0, 0) instead of
+    (sel_x, sel_y) -- a double bug. The translate fixes the
+    position; the crop drops the context ring.
+
+    **Why ``gegl:crop`` (not ``gegl:rectangle``):** the
+    previous version used ``gegl:rectangle`` (a render op that
+    draws a colored rectangle on top of the input) thinking it
+    was a crop. Per ``operations/common/rectangle.c``, the
+    rectangle's output comes from an internal
+    ``gegl:color -> gegl:crop`` chain, so the input pad is
+    effectively ignored -- the result is a green rectangle of
+    the requested size, regardless of the loaded PNG's
+    content. The user saw "no meaningful restoration" because
+    a green rectangle was being pasted into the selection.
+    Using ``gegl:crop`` directly fixes this: the crop's input
+    is the loaded PNG and the output is the cropped content.
+
+    **Size check fix:** the previous version raised an error
+    when ``roi_w != sel_w + 2*context_px`` -- but ``roi_w`` is
+    already clipped to the image bounds in the caller, so on
+    edge selections it doesn't equal the unclipped ideal.
+    The check now compares the loaded PNG's dimensions
+    against the caller's ``roi_w, roi_h`` (the actual
+    expected size).
     """
-    expected_w = sel_w + 2 * context_px
-    expected_h = sel_h + 2 * context_px
-    if roi_w != expected_w or roi_h != expected_h:
-        raise ValueError(
-            f"result dimensions ({roi_w}x{roi_h}) don't match expected "
-            f"ROI+context size ({expected_w}x{expected_h})"
-        )
-
     graph = Gegl.Node()
     loader = graph.create_child("gegl:png-load")
     loader.set_property("path", path)
 
-    crop = graph.create_child("gegl:rectangle")
+    # Verify the loaded PNG matches the caller's ROI dimensions.
+    bounds = loader.get_bounding_box()
+    if bounds.width != roi_w or bounds.height != roi_h:
+        raise ValueError(
+            f"result dimensions ({bounds.width}x{bounds.height}) "
+            f"don't match expected ROI size ({roi_w}x{roi_h})"
+        )
+
+    crop = graph.create_child("gegl:crop")
     crop.set_property("x", float(context_px))
     crop.set_property("y", float(context_px))
     crop.set_property("width", float(sel_w))
