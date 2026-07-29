@@ -1200,9 +1200,20 @@ class NafnetRestore(Gimp.PlugIn):
                     # Selection when the selection was the whole
                     # image). Same root cause as the alpha and
                     # paste-pipeline bugs.
-                    _log("_run_region: getting shadow buffer (has_alpha=" + str(has_alpha) + ")")
-                    full_shadow = drawable.get_shadow_buffer()
-                    _log("_run_region: shadow buffer obtained")
+                    # Use get_buffer() (the active buffer -- current
+                    # state of the drawable), not get_shadow_buffer().
+                    # For a fresh drawable with no pending changes,
+                    # the shadow buffer is uninitialized and can have
+                    # alpha=0 throughout, which would get baked into
+                    # region.png and end up as transparent in the
+                    # pasted result. The whole-image path uses
+                    # get_buffer() and works; the region path must do
+                    # the same. The paste step still uses
+                    # get_shadow_buffer() because that's where we
+                    # WRITE the changes.
+                    _log("_run_region: getting active buffer (has_alpha=" + str(has_alpha) + ")")
+                    full_shadow = drawable.get_buffer()
+                    _log("_run_region: active buffer obtained")
                     graph = Gegl.Node()
                     source = graph.create_child("gegl:buffer-source")
                     source.set_property("buffer", full_shadow)
