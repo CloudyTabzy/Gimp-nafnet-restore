@@ -844,26 +844,29 @@ class NafnetRestore(Gimp.PlugIn):
                     else:
                         _log("_run_whole: no alpha to extract; worker will use input alpha")
 
-                    _phase("Running NAFNet worker (python)...", 0.20)
-                    # Use Python worker directly. No alpha, no rust.
-                    if not os.path.isfile(WORKER_SCRIPT):
-                        return _execution_error(
-                            procedure,
-                            f"Worker script is missing: {WORKER_SCRIPT}.",
-                        )
+                    _phase("Running NAFNet worker...", 0.20)
+                    # Worker selection. The Rust worker (default) has
+                    # 512x512 tiled inference + 2D tent blend, which
+                    # avoids the BFC arena OOM that the single-pass
+                    # Python worker hits on images >~1 Mpix. The Python
+                    # worker remains the fallback.
+                    _log("_run_whole: resolving worker command")
                     try:
-                        worker_python = find_worker_python()
+                        command, use_rust = self._resolve_worker_command(
+                            image_path, output_path, alpha_path=alpha_path,
+                        )
+                    except FileNotFoundError as exc:
+                        _log("_run_whole: worker FileNotFoundError: " + str(exc))
+                        return _execution_error(procedure, str(exc))
                     except RuntimeError as exc:
+                        _log("_run_whole: worker RuntimeError: " + str(exc))
                         return _calling_error(procedure, str(exc))
-                    command = [
-                        worker_python, WORKER_SCRIPT,
-                        "--image", image_path,
-                        "--output", output_path,
-                        "--model", MODEL_PATH,
-                    ]
-                    if alpha_path is not None:
-                        command += ["--alpha", alpha_path]
+
                     _log("_run_whole: command=" + " ".join(command))
+                    if use_rust:
+                        _log("worker: rust (tiled)")
+                    else:
+                        _log("worker: python (single-pass; may OOM on >1 Mpix)")
 
                     _log("_run_whole: spawning worker (no progress callback)")
                     completed = _run_subprocess(command)
